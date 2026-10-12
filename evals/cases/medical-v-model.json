@@ -1,0 +1,23 @@
+{
+  "id": "medical-v-model",
+  "declaration": "Software for an infusion pump, IEC 62304 class B. Requirements are fixed per release, every change needs traceability from requirement to test, and a named QA lead signs off releases. Team of three.",
+  "answers": "No exploration happens in this repository. Requirement changes have been handled ad hoc and that hurt the last audit. Field problems arrive as problem reports. The agent should never run things in parallel and should show its plan before building. Integration tests run on a pump simulator, system tests on a shared bench pump. Releases are built and archived by scripts/release.sh.",
+  "reference": "examples/medical-v-model-flow",
+  "expect": {
+    "profile": {
+      "failure_cost": "regulated",
+      "requirements": "fixed",
+      "cadence": "phase-gated",
+      "autonomy": "low",
+      "parallelism": "none",
+      "journey": { "excludes": ["explore"] },
+      "rails": "strict"
+    },
+    "playbooks": { "min": 5, "max": 12 },
+    "promotes": ["tracer->hardened"],
+    "lifecycles_absent": ["throwaway"],
+    "human_gate_on_promotion": true,
+    "irreversible": true,
+    "guarded_irreversible": true, "checks_on_kept": true, "domain_fit": true, "runtime": true
+  }
+}

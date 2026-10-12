@@ -1,0 +1,21 @@
+{
+  "id": "scrum-team",
+  "declaration": "Two-week sprints with a PO-owned backlog. Five developers, GitHub PRs, and nothing ships without QA sign-off. B2B invoicing SaaS on Postgres; customers' ERPs call our public REST API, and they are on SLAs.",
+  "answers": "The QA lead decides releases. Product discovery happens elsewhere, not in this repository. The workflow should trigger automatically. A separate SRE team owns incidents. Tests run with pnpm test; releases with pnpm release, which also runs migrations. API fields are removed only after 90 days' notice.",
+  "reference": "examples/scrum-team-flow",
+  "expect": {
+    "profile": {
+      "cadence": "timeboxed",
+      "failure_cost": "customer",
+      "team": "small",
+      "journey": { "includes": ["extract"], "excludes": ["explore"] },
+      "invocation": "auto",
+      "facets": { "includes": ["shared-contracts", "data-mutation"] }
+    },
+    "playbooks": { "min": 5, "max": 12 },
+    "promotes": ["*->hardened"],
+    "lifecycles_absent": ["throwaway"],
+    "irreversible": true,
+    "guarded_irreversible": true, "checks_on_kept": true, "domain_fit": true, "runtime": true
+  }
+}

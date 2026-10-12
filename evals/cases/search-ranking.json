@@ -1,0 +1,19 @@
+{
+  "id": "search-ranking",
+  "declaration": "We improve product search ranking for an e-commerce site. Ideas start as offline experiments on click logs; promising ones go to shadow traffic, then an A/B test ramp. Three of us, Python for the ranker and a Go serving layer. Revenue is on the line, so every ramp needs sign-off.",
+  "answers": "NDCG@10 on a frozen judgment set over three seeds decides offline experiments. The most recent full week of logs is held out and may only be evaluated right before a ramp. The product owner approves each ramp stage. The serving budget is p99 40 ms at 2k QPS. Experiment code is never kept; winners are rebuilt. On-call is shared with the platform team.",
+  "reference": "examples/search-ranking-flow",
+  "expect": {
+    "profile": {
+      "journey": ["explore", "expand", "extract"],
+      "failure_cost": "customer",
+      "facets": { "includes": ["measured-outcome", "data-dependence"] },
+      "rails": { "oneOf": ["standard", "strict"] }
+    },
+    "playbooks": { "min": 5, "max": 12 },
+    "promotes": ["throwaway->tracer", "*->hardened"],
+    "human_gate_on_promotion": true,
+    "irreversible": true,
+    "guarded_irreversible": true, "checks_on_kept": true, "domain_fit": true, "runtime": true
+  }
+}

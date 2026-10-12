@@ -1,0 +1,17 @@
+{
+  "id": "crop-drone",
+  "declaration": "Flight software for an agricultural spraying drone. We plan spray paths from field maps, test in a PX4 SITL simulator, then fly test fields with a licensed pilot. Spray chemicals and no-fly zones make mistakes expensive. Four of us; firmware updates go to farmers' drones over the air.",
+  "answers": "A licensed pilot must be present for every real flight and can take over manually. Field maps come as GeoJSON from customers. OTA updates go to a 5% cohort first. Path planning changes are judged by coverage percentage and overspray area in simulation. There is no data we train on.",
+  "expect": {
+    "profile": {
+      "hardware": { "oneOf": ["attached", "custom-hardware"] },
+      "facets": { "includes": ["physical-world", "stand-in-ladder", "external-release"] },
+      "rails": { "oneOf": ["standard", "strict"] }
+    },
+    "playbooks": { "min": 5, "max": 12 },
+    "promotes": ["*->hardened"],
+    "human_gate_on_promotion": true,
+    "irreversible": true,
+    "guarded_irreversible": true, "checks_on_kept": true, "domain_fit": true, "runtime": true
+  }
+}

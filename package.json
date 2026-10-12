@@ -1,0 +1,15 @@
+{
+  "name": "vajra",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Meta skill creator that generates routed workflow skills from a developer's stated way of working.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "examples": "for d in examples/*/; do mkdir -p \"$d/scripts\" && cp skills/vajra/scripts/flow.mjs skills/vajra/scripts/validate.mjs \"$d/scripts/\" && node skills/vajra/scripts/validate.mjs \"$d\" --write-graph || exit 1; done"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

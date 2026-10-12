@@ -1,0 +1,20 @@
+{
+  "id": "robot-grasp",
+  "declaration": "Perception-to-grasp stack for a pick-and-place arm. ROS 2, one camera, Gazebo simulation, and one real arm in the lab. We try ideas in sim first; anything that moves the real arm must be safe. Two of us.",
+  "answers": "There is an e-stop, and an operator is always present in the lab. No hardware-in-the-loop rig exists. We train the detector on our own images and keep a held-out split. Questions are about feasibility, not design variants. Safety limits are changed only by the operator, by hand.",
+  "reference": "examples/robot-grasp-flow",
+  "expect": {
+    "profile": {
+      "journey": ["explore", "expand", "extract"],
+      "hardware": { "oneOf": ["attached", "custom-hardware"] },
+      "autonomy": { "oneOf": ["medium", "low"] },
+      "facets": { "includes": ["physical-world", "stand-in-ladder", "data-dependence"] },
+      "rails": { "oneOf": ["standard", "strict"] }
+    },
+    "playbooks": { "min": 5, "max": 12 },
+    "promotes": ["throwaway->tracer", "*->hardened"],
+    "human_gate_on_promotion": true,
+    "irreversible": true,
+    "guarded_irreversible": true, "checks_on_kept": true, "domain_fit": true, "runtime": true
+  }
+}
