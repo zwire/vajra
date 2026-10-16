@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateSkill, validatePlaybook, toMermaid, parseFrontmatter, ENUMS, PROFILE_AXES, SKILL_FIELDS, VERSION } from "../skills/vajra/scripts/validate.mjs";
+import { validateSkill, validatePlaybook, toMermaid, parseFrontmatter, ENUMS, PROFILE_AXES, SKILL_FIELDS, VERSION, RUNTIME } from "../skills/vajra/scripts/validate.mjs";
 import { loadCase, check } from "../evals/eval.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -26,7 +26,7 @@ for (const ex of examples) {
     assert.ok(Object.keys(r.bindings).length > 0, "the example names its repository values through bindings");
   });
   test(`example ${ex} carries the current runtime`, () => {
-    for (const f of ["flow.mjs", "validate.mjs"]) {
+    for (const f of RUNTIME) {
       assert.equal(read(dir, "scripts", f), read(skill, "scripts", f), `run: npm run examples (${f} differs)`);
     }
   });

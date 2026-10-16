@@ -90,7 +90,7 @@ function project({ rails = "standard" } = {}) {
   const skill = path.join(proj, ".claude", "skills", "demo-flow");
   fs.mkdirSync(path.join(skill, "playbooks"), { recursive: true });
   fs.mkdirSync(path.join(skill, "scripts"));
-  for (const f of ["flow.mjs", "validate.mjs"]) fs.copyFileSync(path.join(scripts, f), path.join(skill, "scripts", f));
+  for (const f of ["flow.mjs", "guard.mjs", "validate.mjs"]) fs.copyFileSync(path.join(scripts, f), path.join(skill, "scripts", f));
   fs.writeFileSync(path.join(skill, "SKILL.md"), "---\nname: demo-flow\ndescription: Demo. Only use when the user invokes demo-flow by name.\n---\n\nDrive runs with `scripts/flow.mjs`.\n\n[spike](playbooks/spike.md) [ship](playbooks/ship.md)\n");
   fs.writeFileSync(path.join(skill, "playbooks", "spike.md"), SPIKE);
   fs.writeFileSync(path.join(skill, "playbooks", "ship.md"), SHIP);

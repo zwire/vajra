@@ -166,7 +166,7 @@ Portability warnings: text in `SKILL.md`, `principles.md`, `profile.md` or a pla
 
 Domain-fit warnings: a work or gate playbook whose "Done when", or all of whose steps, name nothing concrete (no command, path, metric or link); a profile without a `## Domain model`.
 
-Runtime warnings: `scripts/flow.mjs` or `scripts/validate.mjs` missing, a runtime version different from the validator's, a router that does not mention `scripts/flow.mjs`.
+Runtime warnings: `scripts/flow.mjs`, `scripts/guard.mjs` or `scripts/validate.mjs` missing, a runtime version different from the validator's, a router that does not mention `scripts/flow.mjs`.
 
 Composition warnings compare the profile with the graph (rules from [composition.md](composition.md)): the journey leaves explore but nothing promotes from `throwaway`; the journey reaches extract but nothing promotes to `hardened`; lifecycles exist that the journey does not include; a regulated profile has a promotion gate without a `[human-gate]`; hardware or customer-facing production without any `[irreversible]` step; `[irreversible]` steps without guarded commands when rails are on; hardware without the `physical-world` facet; an explicit-invocation profile whose description does not say so; `physical-world` with advisory rails; regulated work without strict rails; kept-code playbooks without `checks` when `verification` is not `evidence`. Fix them, or record the reason in `profile.md` under `## Composition notes`.
 

@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "examples": "for d in examples/*/; do mkdir -p \"$d/scripts\" && cp skills/vajra/scripts/flow.mjs skills/vajra/scripts/validate.mjs \"$d/scripts/\" && node skills/vajra/scripts/validate.mjs \"$d\" --project \"${d%/}.project.md\" --write-graph || exit 1; done"
+    "examples": "for d in examples/*/; do mkdir -p \"$d/scripts\" && cp skills/vajra/scripts/flow.mjs skills/vajra/scripts/guard.mjs skills/vajra/scripts/validate.mjs \"$d/scripts/\" && node skills/vajra/scripts/validate.mjs \"$d\" --project \"${d%/}.project.md\" --write-graph || exit 1; done"
   },
   "engines": {
     "node": ">=18"

@@ -2,7 +2,7 @@
 name: vajra
 description: Meta skill creator that turns a developer's stated way of working and problem domain into a custom workflow skill (a router entry point plus per-use-case playbooks connected by phase transitions and quality gates). Only use when the user explicitly invokes vajra by name (for example /vajra); never trigger automatically.
 license: MIT
-compatibility: Requires Node.js 18+ for scripts/validate.mjs, scripts/flow.mjs and scripts/interview.mjs. Works with any agent that loads Agent Skills.
+compatibility: Requires Node.js 18+ for scripts/validate.mjs, scripts/flow.mjs, scripts/guard.mjs and scripts/interview.mjs. Works with any agent that loads Agent Skills.
 metadata:
   version: "0.3.0"
 ---
@@ -67,5 +67,6 @@ Read only what the current step needs.
 | [scripts/validate.mjs](scripts/validate.mjs) | Validator and graph renderer: `node scripts/validate.mjs <skill-dir> [--project <root>] --write-graph` |
 | [scripts/interview.mjs](scripts/interview.mjs) | Renders a consult round as chat text, a one-page form, or a local form that returns the answers as JSON |
 | [scripts/flow.mjs](scripts/flow.mjs) | Runtime copied into every generated skill: run state, transitions, checks; CLI, MCP server and lifecycle hooks |
+| [scripts/guard.mjs](scripts/guard.mjs) | Part of the runtime: reads the agent's shell lines and edits for the hooks, and decides what touches the run state or the rails |
 | [references/rails.md](references/rails.md) | What the runtime enforces, the standards it follows, how to install it per agent, and the limits of enforcement |
 | [references/calibration.md](references/calibration.md) | Worked excerpts showing how concrete a domain model, a playbook and its rails should be |
