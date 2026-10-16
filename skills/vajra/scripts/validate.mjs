@@ -84,7 +84,13 @@ const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "su"]);
 const POWERSHELLS = new Set(["pwsh", "powershell"]);
 const WRAPPERS = new Set(["sudo", "env", "exec", "nohup", "command", "time", "nice", "doas", "&", "."]);
 const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time"]);
+// Past these limits a line is not read further but refused as too complex: scripts nested deeper
+// than MAX_DEPTH would otherwise go unchecked, and a line built to multiply the work (`ssh ssh ...`)
+// would run the hook into its timeout, which most agents treat as "allow".
 const MAX_DEPTH = 8;
+const MAX_READS = 500;
+const MAX_CHARS = 4_000_000;
+export class TooComplex extends Error {}
 
 // The program a word names, as the shell would look it up: no directory, no .exe, any case.
 export const programName = (t) => t.replace(/\\/g, "/").split("/").pop().toLowerCase().replace(/\.exe$/, "");
@@ -208,7 +214,8 @@ function tokenize(s, ps, nested, bodies) {
   return cmds;
 }
 
-function readShell(s, depth, ps) {
+function readShell(s, depth, ps, ctx) {
+  if (++ctx.reads > MAX_READS) throw new TooComplex("too many nested scripts");
   const nested = [], bodies = [];
   const out = [];
   for (let w of tokenize(s, ps, nested, bodies)) {
@@ -258,20 +265,27 @@ function readShell(s, depth, ps) {
     for (const v of out) if (v !== w) nested.push({ text: v.slice(v[0].quoted ? 0 : 1).map((x) => x.text).join(" "), ps: dialect });
     for (const x of args) if (x.redir) nested.push({ text: x.text, ps: dialect });
   }
-  if (depth < MAX_DEPTH) for (const n of nested) out.push(...readShell(n.text, depth + 1, n.ps));
+  ctx.chars += nested.reduce((sum, n) => sum + n.text.length, 0);
+  if (ctx.chars > MAX_CHARS) throw new TooComplex("too much nested script text");
+  // Each script is read once, so repeats (every suffix of `ssh a b c`) cost nothing deeper down.
+  const fresh = nested.filter((n) => n.text.trim() && !ctx.seen.has(`${n.ps}:${n.text}`));
+  for (const n of fresh) ctx.seen.add(`${n.ps}:${n.text}`);
+  if (fresh.length && depth >= MAX_DEPTH) throw new TooComplex("scripts nested too deeply");
+  for (const n of fresh) out.push(...readShell(n.text, depth + 1, n.ps, ctx));
   return out;
 }
 
 // Reads a command line as POSIX shell and, when `ps` is set, also as PowerShell, so a check sees
 // every way the line could run. `failed` is set when a reading failed (an unclosed quote, say);
-// callers then also check the raw text, so they fail closed.
+// callers then also check the raw text, so they fail closed. `complex` is set when the line is past
+// the reader's limits; callers refuse it outright.
 export function shellCommands(command, { ps = false } = {}) {
   const cmds = [];
-  let failed = false;
+  let failed = false, complex = false;
   for (const dialect of ps ? [false, true] : [false]) {
-    try { cmds.push(...readShell(String(command), 0, dialect)); } catch { failed = true; }
+    try { cmds.push(...readShell(String(command), 0, dialect, { seen: new Set(), reads: 0, chars: 0 })); } catch (e) { failed = true; if (e instanceof TooComplex) complex = true; }
   }
-  return { cmds, failed };
+  return { cmds, failed, complex };
 }
 
 // A command guard matches where a command, or a path to the program it runs, starts: at its first
@@ -280,8 +294,8 @@ export function shellCommands(command, { ps = false } = {}) {
 // a grep pattern) is data, not a command. PowerShell is matched without regard to case, as it runs
 // commands. A line the reader cannot parse is also matched as plain text.
 export function guardMatches(pattern, command, { ps = false } = {}) {
-  const { cmds, failed } = shellCommands(command, { ps });
-  if (failed && commandMatches(pattern, command)) return true;
+  const { cmds, failed, complex } = shellCommands(command, { ps });
+  if (complex || (failed && commandMatches(pattern, command))) return true;
   const re = pattern.match(/^\/(.+)\/([a-z]*)$/);
   for (const w of cmds) {
     if (["echo", "printf", "write-output", "write-host"].includes(programName(w[0].text))) continue;

@@ -275,6 +275,35 @@ test("the run state is protected in every shell, while reading it is not blocked
   assert.equal(p.hook("pre-tool-use", { tool_name: "apply_patch", tool_input: { input: "*** Begin Patch\n*** Update File: scratch/a\n*** Move to: .flow/demo-flow/state.json\n*** End Patch" } }).status, 2);
 });
 
+test("a line too deep or too costly to read is refused, not let through", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  // Scripts nested past the reader's depth used to go unchecked.
+  let deep = "rm -rf .flow";
+  for (let i = 0; i < 10; i++) deep = `eval ${JSON.stringify(deep)}`;
+  // Lines built to multiply the reading work used to run the hook into its timeout.
+  const wide = `rm -rf .flow; ${"ssh ".repeat(400)}x`;
+  const widePs = `Remove-Item .flow; ${"pwsh ".repeat(400)}x`;
+  for (const c of [deep, wide, `${"ssh ".repeat(400)}x`]) {
+    const t = Date.now();
+    const r = p.bash(c);
+    assert.equal(r.status, 2, c.slice(0, 80));
+    assert.ok(Date.now() - t < 10000, "answered well inside a hook timeout");
+  }
+  assert.equal(p.hook("pre-tool-use", { tool_name: "PowerShell", tool_input: { command: widePs } }).status, 2);
+  // Ordinary nesting is still read normally.
+  assert.equal(p.bash("ssh host 'ls -la'").status, 0);
+  assert.equal(p.bash("bash -c \"bash -c 'eval ls'\"").status, 0);
+});
+
+test("a tool hook that crashes refuses the call", () => {
+  const p = project();
+  // An unreadable payload field the hook does not expect: cwd must be a string.
+  const r = p.hook("pre-tool-use", { cwd: 42, tool_name: "Bash", tool_input: { command: "ls" } });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /could not check this call/);
+});
+
 test("only the human approves, and the agent cannot switch its own rails off", () => {
   const p = project();
   toGate(p);

@@ -722,7 +722,8 @@ function railsViolation(w, ctx) {
 const PIPE_WRITERS = /^(xargs|parallel|remove-item|ri|rm|del|erase|rd|rmdir|move-item|mi|mv|move|rename-item|rni|set-content|sc|add-content|ac|clear-content|clc|out-file|copy-item|cpi|tee-object|tee|new-item|ni)$/;
 
 export function shellViolation(command, ps, ctx) {
-  const { cmds, failed } = shellCommands(command, { ps });
+  const { cmds, failed, complex } = shellCommands(command, { ps });
+  if (complex) return "complex";
   const found = new Set(cmds.flatMap((w) => [commandViolation(w), ctx && railsViolation(w, ctx)]).filter(Boolean));
   const pipeWriter = (w) => {
     const k = commandStart(w), name = programName(w[k].text);
@@ -806,6 +807,7 @@ function preToolUse(g, state, input, root) {
     const v = shellViolation(cmd, act.ps, { root, cwd: input.cwd || root });
     if (v === "human") return "only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.";
     if (v === "rails") return RAILS_MSG;
+    if (v === "complex") return "this command nests shells or scripts too deeply for the rails to check. Run it as simpler, separate commands.";
     if (v === "clean") return "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.";
     if (v === "state") return "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
     if (g.unboundGuards.length && !readOnly(cmd, act.ps)) {
@@ -853,6 +855,18 @@ function context(input, text, format) {
   return JSON.stringify(format === "copilot" ? { additionalContext: text, ...out } : out);
 }
 
+// Exit code 2 with the reason on stderr is the common protocol. Copilot drops stderr and shows
+// only "hook exited with code 2", so it gets the reason as a structured deny instead.
+function blockTool(reason, format) {
+  if (format === "copilot") {
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${tag} Blocked: ${reason}` } }));
+    return 0;
+  }
+  if (format === "antigravity") { console.log(JSON.stringify({ decision: "deny", reason: `${tag} Blocked: ${reason}` })); return 0; }
+  process.stderr.write(`${tag} Blocked: ${reason}\n`);
+  return 2;
+}
+
 function runHook(event, format) {
   const input = normalizePayload(readStdin());
   const root = findRoot(input.cwd || process.cwd());
@@ -892,15 +906,7 @@ function runHook(event, format) {
     // leaves its own permission prompts in place (checked against agy 1.3.3).
     if (!reason) { if (format === "antigravity") console.log(JSON.stringify({ decision: "allow" })); return 0; }
     st.log({ event: "block-tool", tool: input.tool_name, reason });
-    // Exit code 2 with the reason on stderr is the common protocol. Copilot drops stderr and shows
-    // only "hook exited with code 2", so it gets the reason as a structured deny instead.
-    if (format === "copilot") {
-      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${tag} Blocked: ${reason}` } }));
-      return 0;
-    }
-    if (format === "antigravity") { console.log(JSON.stringify({ decision: "deny", reason: `${tag} Blocked: ${reason}` })); return 0; }
-    process.stderr.write(`${tag} Blocked: ${reason}\n`);
-    return 2;
+    return blockTool(reason, format);
   }
   if (event === "stop") {
     const reason = stopCheck(g, state, input, root);
@@ -1065,7 +1071,14 @@ export function serveMcp(input = process.stdin, output = process.stdout) {
 
 export function main(argv) {
   const [cmd, ...rest] = argv;
-  if (cmd === "hook") return runHook(rest[0], parseArgs(rest.slice(1)).o.format);
+  if (cmd === "hook") {
+    const format = parseArgs(rest.slice(1)).o.format;
+    try { return runHook(rest[0], format); } catch (e) {
+      // A crashed tool hook exits 1, which agents treat as "allow"; refuse the call instead.
+      if (rest[0] !== "pre-tool-use") throw e;
+      return blockTool(`the rails could not check this call (${e.message}). Stop and ask the user.`, format);
+    }
+  }
   if (cmd === "mcp") { serveMcp(); return undefined; }
   if (!cmd || cmd === "help" || cmd === "--help") {
     const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
