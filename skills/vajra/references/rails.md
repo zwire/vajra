@@ -42,7 +42,7 @@ step <n> --evidence "…"          or --skip "<reason>"; steps behind an unappro
 step <n>                         on a [human-gate] step: interrupts the run and tells the agent to stop and ask
 finish --evidence "…"            needs every step recorded; runs the playbook's checks
 exit <to> --because "…"          only exits open for the check result (on: pass | on: fail); the next playbook starts
-pause --note "…" / resume        a clean stop mid-playbook
+pause --note "…" / resume        a clean stop mid-playbook; while paused, edits are free for other work (except under strict rails) and guarded commands stay blocked
 status / log                     where the run is, and what happened
 ```
 
@@ -54,14 +54,14 @@ When the agent reaches a `[human-gate]` step, `flow step <n>` interrupts the run
 - runs `node <skill>/scripts/flow.mjs approve` (or `reject --reason …`) in their own terminal; or
 - answers the elicitation dialog, when the optional MCP server is installed and the client supports elicitation.
 
-The tool hook blocks the agent from running `approve`, `reject`, `suspend` or `unsuspend`, and from reading or writing `.flow/` directly. A rejected gate skips the steps behind it; the agent finishes the playbook and takes the exit that fits.
+The tool hook blocks the agent from running `approve`, `reject`, `suspend` or `unsuspend`, and from changing `.flow/` directly (reading it with `cat`, `jq` and the like is allowed). A rejected gate skips the steps behind it; the agent finishes the playbook and takes the exit that fits.
 
 ## Rails levels
 
 | | advisory | standard | strict |
 |---|---|---|---|
 | Runtime enforces transitions, gates and checks when used | ✓ | ✓ | ✓ |
-| Run state injected at session start and on every prompt | ✓ | ✓ | ✓ |
+| Run state injected at session start and on every prompt during a run | ✓ | ✓ | ✓ |
 | Approvals only from the human; `.flow/` protected | ✓ (chat approvals) | ✓ | ✓ |
 | Guarded `irreversible` commands blocked outside their approved step | | ✓ | ✓ |
 | Edits limited to the active playbook's `writes` | | ✓ | ✓ |
@@ -106,7 +106,7 @@ Be honest with the user about what is enforced and what is not:
 
 - **Choices stay with the agent.** Which entry matches a request and which open exit fits are judgments. The runtime limits them to legal options, and checks with `on: pass | fail` route the most important branch mechanically.
 - **Evidence text is self-reported** unless a check backs it. Put everything that can be checked mechanically into `checks`.
-- **Command guards match command text** (substring or `/regex/`) where a command starts: the line is read as shell, so a pattern that only appears in a quoted argument, a comment or a heredoc body (a commit message, a grep pattern, notes) does not trigger, while `$(...)`, `sh -c`, `eval` and `ssh` scripts are checked. A line the reader cannot parse is matched as plain text. They stop drift and mistakes, not a determined adversary: an equivalent command written differently is not caught. Guard the commands people actually use, and prefer wrapper scripts (`npm run deploy`) that are easy to match.
+- **Command guards match command text** (substring or `/regex/`) where a command starts: the line is read as shell, so a pattern that only appears in a quoted argument, a comment or a heredoc body (a commit message, a grep pattern, notes) does not trigger, while `$(...)`, `sh -c`, `eval` and `ssh` scripts, and heredocs or pipes that feed a shell (`bash <<EOF`, `echo ... | sh`), are checked. A script written to a file and run later (`cat > x.sh <<EOF`, then `bash x.sh`) is not. A line the reader cannot parse is matched as plain text. They stop drift and mistakes, not a determined adversary: an equivalent command written differently is not caught. Guard the commands people actually use, and prefer wrapper scripts (`npm run deploy`) that are easy to match.
 - **`writes` covers the agent's edit tools.** Files changed through shell commands are not checked.
 - **Hooks differ in reach between agents.** Some fire tool hooks only for shell commands, and some cannot inject context on every event. Blocking with exit code 2 is the common ground; check the agent's own documentation for the rest. Known gaps: Copilot CLI runs repository hooks only in a folder the user has trusted, and drops the output of prompt hooks, so run state is injected only at session start (the Copilot hooks pass `--format copilot`, which emits the deny reason and session context in the fields Copilot reads). Windsurf has no session-start or stop hook and cannot inject context, so it gets blocking and chat approvals only. Copilot's cloud agent has no human in the loop mid-run, so a run that reaches a human gate stops there. Antigravity has no prompt hook: run state is injected at the first model call of each turn, but chat replies never reach the hook, so human gates are passed with `flow approve` in a terminal; it reads decisions only as JSON (`--format antigravity`), and runs no hooks at all under `--dangerously-skip-permissions`.
 - **An invalid graph turns the rails off** rather than blocking the agent; the injected context says so until the graph validates again.

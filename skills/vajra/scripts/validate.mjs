@@ -77,6 +77,7 @@ export function commandMatches(pattern, command) {
 // <(...), and the script of `sh -c`, `eval`, `ssh` and `watch`) is read as commands of its own.
 // Returns null when the line cannot be read (an unclosed quote, say), so callers can fail closed.
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "su"]);
+const WRAPPERS = new Set(["sudo", "env", "exec", "nohup", "command", "time", "nice", "doas"]);
 const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time"]);
 
 function closing(s, i, open, close) {
@@ -102,7 +103,7 @@ function substitutions(s, nested) {
 }
 
 function readShell(s, depth) {
-  const cmds = [], nested = [], heredocs = [];
+  const cmds = [], nested = [], heredocs = [], bodies = [];
   let words = [], word = null, redir = false;
   const flush = () => { if (word) { words.push(word); word = null; } };
   const end = () => { flush(); if (words.length) cmds.push(words); words = []; redir = false; };
@@ -121,7 +122,8 @@ function readShell(s, depth) {
           lines.push(line);
           if (nl < 0) break;
         }
-        if (!h.quoted) substitutions(lines.join("\n"), nested);
+        bodies.push(lines.join("\n"));
+        if (!h.quoted) substitutions(bodies[bodies.length - 1], nested);
         i = j - 1;
       }
       heredocs.length = 0;
@@ -176,6 +178,17 @@ function readShell(s, depth) {
     }
     if (head === "eval" || head === "watch") nested.push(w.slice(1).map((x) => x.text).join(" "));
     if (head === "ssh") for (let k = 1; k < w.length; k++) nested.push(w.slice(k).map((x) => x.text).join(" "));
+  }
+  // A shell reading its script from stdin (`bash <<EOF`, `cat x | sh`, `bash <<< "..."`) runs
+  // whatever the line feeds it, so heredoc bodies and the other commands' arguments become code.
+  const feedsShell = out.some((w) => {
+    let k = 0;
+    while (k < w.length - 1 && (/^\w+=/.test(w[k].text) || /^-/.test(w[k].text) || WRAPPERS.has(w[k].text))) k++;
+    return SHELLS.has(w[k].text.split("/").pop()) && w.slice(k + 1).every((x) => x.redir || (/^-/.test(x.text) && !/^-[a-z]*c[a-z]*$/i.test(x.text)));
+  });
+  if (feedsShell && depth < 8) {
+    nested.push(...bodies);
+    for (const w of out) if (w.length > 1) nested.push(w.slice(1).map((x) => x.text).join(" "));
   }
   for (const n of nested) out.push(...(depth < 8 ? readShell(n, depth + 1) : []));
   return out;

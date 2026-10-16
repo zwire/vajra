@@ -161,7 +161,10 @@ function describe(g, state, root) {
   if (state.suspended) return `${tag} Rails suspended by the user.`;
   const run = state.run;
   if (!run) {
-    return `${tag} No playbook is active. To work on a task with this workflow, match it to a playbook in SKILL.md and run \`${flowCmd(root)} start <playbook> --request "<one line>"\`.`;
+    const how = `match it to a playbook in SKILL.md and run \`${flowCmd(root)} start <playbook> --request "<one line>"\``;
+    // An explicit skill must not pull unrelated work onto its rails; strict rails need a run to edit at all.
+    if (g.profile.invocation === "explicit" && g.profile.rails !== "strict") return `${tag} No playbook is active. Use this workflow only when the user asks for it by name; then ${how}. Other work needs no playbook.`;
+    return `${tag} No playbook is active. To work on a task with this workflow, ${how}.`;
   }
   const node = g.nodes.get(run.playbook);
   const done = node.steps.filter((s) => RESOLVED.has(run.steps[s.n].status)).length;
@@ -517,6 +520,8 @@ export function toolAction(input) {
   return { kind: "other" };
 }
 
+const READ_ONLY = new Set(["cat", "head", "tail", "less", "more", "ls", "wc", "grep", "egrep", "rg", "jq", "stat", "file", "diff", "tree", "du"]);
+
 function preToolUse(g, state, input, root) {
   const rails = g.profile.rails || "standard";
   if (!g.ok || state.suspended || rails === "advisory") return null;
@@ -531,6 +536,7 @@ function preToolUse(g, state, input, root) {
       if (rel.startsWith("..")) continue;
       if (!run) { if (rails === "strict") return `no playbook is active, so edits are blocked. Match the task to a playbook and run \`${f} start <playbook> --request "..."\`.`; continue; }
       if (run.paused && rails === "strict") return `the run is paused; \`${f} resume\` before editing.`;
+      if (run.paused) continue; // a paused run leaves the agent free for other work; guarded commands stay blocked
       const node = g.nodes.get(run.playbook);
       if (node.writes.length && !node.writes.some((w) => globToRegExp(w).test(rel))) {
         return `playbook ${node.id} may only write ${node.writes.join(", ")}; ${rel} is outside. Finish the playbook and take an exit to one that owns this path.`;
@@ -544,13 +550,16 @@ function preToolUse(g, state, input, root) {
     // Read as shell, so a commit message or grep pattern that only mentions these is not blocked.
     // A line that cannot be read is checked as plain text instead.
     const cmds = shellCommands(cmd);
-    const words = cmds ? cmds.flat().map((w) => w.text) : null;
     const humanOnly = cmds
       ? cmds.some((w) => w.some((x, k) => /(^|\/)flow\.mjs$/.test(x.text) && /^(approve|reject|suspend|unsuspend)$/.test(w[k + 1]?.text || "")))
       : /flow\.mjs["']?\s+(approve|reject|suspend|unsuspend)\b/.test(cmd);
     if (humanOnly) return "only the user can approve, reject or suspend. Stop and ask them.";
-    const touchesState = words ? words.some((t) => /(^|[=:/])\.flow(\/|$)/.test(t)) : /(^|[\s'"=:(/])\.flow(\/|\s|$|['")])/.test(cmd);
-    if (touchesState) return "the run state in .flow/ is read and written only through flow.mjs (try `flow status` or `flow log`).";
+    // Reading the state is harmless (the Read tool may do it too); anything else must go through flow.mjs.
+    const isState = (t) => /(^|[=:/])\.flow(\/|$)/.test(t);
+    const touchesState = cmds
+      ? cmds.some((w) => w.some((x) => isState(x.text)) && (!READ_ONLY.has(w[0].text) || w.some((x) => x.redir && isState(x.text))))
+      : /(^|[\s'"=:(/])\.flow(\/|\s|$|['")])/.test(cmd);
+    if (touchesState) return "the run state in .flow/ is changed only through flow.mjs (reading it is fine; try `flow status` or `flow log`).";
     for (const node of g.nodes.values()) {
       for (const pat of node.guards) {
         if (!guardMatches(pat, cmd)) continue;
@@ -621,6 +630,8 @@ function runHook(event, format) {
         note = `${tag} The user ${ok ? "approved" : "rejected"} step ${n} of ${state.run.playbook}.\n`;
       }
     }
+    // Without a run there is nothing to track on every prompt; session start already said how to begin.
+    if (!note && g.ok && !state.run && !state.suspended && (g.profile.rails || "standard") !== "strict") return 0;
     console.log(context(input, note + describe(g, state, root), format));
     return 0;
   }
