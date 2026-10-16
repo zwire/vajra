@@ -54,7 +54,7 @@ Map phrases to values. Explicit statements override cues; record the cue as evid
 
 ## Interview question bank
 
-Used by the consult session ([../workflows/consult.md](../workflows/consult.md)), one question at a time, each with a recommended option. Ask only questions whose answer changes the graph. Examples:
+Used by the consult session ([../workflows/consult.md](../workflows/consult.md)) in short rounds, each question with a recommended option that starts selected. The lettered options map directly to the options of a round spec ([../templates/interview-round.json](../templates/interview-round.json)), with the axis value as each option's `value`. Ask only questions whose answer changes the graph. Examples:
 
 1. **Where does this work usually start?** a) A clear spec · b) A rough goal I refine as I go *(recommended for most product work)* · c) A question I can't even phrase yet
 2. **What happens to code written while exploring?** a) Always thrown away · b) The good parts grow into the real system *(recommended)* · c) It is the real system

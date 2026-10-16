@@ -2,7 +2,7 @@
 name: vajra
 description: Meta skill creator that turns a developer's stated way of working and problem domain into a custom workflow skill (a router entry point plus per-use-case playbooks connected by phase transitions and quality gates). Only use when the user explicitly invokes vajra by name (for example /vajra); never trigger automatically.
 license: MIT
-compatibility: Requires Node.js 18+ for scripts/validate.mjs and scripts/flow.mjs. Works with any agent that loads Agent Skills.
+compatibility: Requires Node.js 18+ for scripts/validate.mjs, scripts/flow.mjs and scripts/interview.mjs. Works with any agent that loads Agent Skills.
 metadata:
   version: "0.2.0"
 ---
@@ -38,7 +38,7 @@ When unclear, default to **Generate** if no generated skill exists in the projec
 ## Operating rules
 
 1. **Shortest path first.** Every playbook, step and gate in the output must be justified by the profile. Remove anything the profile does not need. A generated skill usually has 5–12 playbooks.
-2. **Infer first, then grill.** Infer what you can from the user's words, the repository and the toolchain. Then question the user one question at a time, each with a recommendation, until every graph-changing decision is settled or the user says to proceed.
+2. **Infer first, then grill.** Infer what you can from the user's words, the repository and the toolchain. Then question the user in short rounds of choices, each pre-set to your recommendation, until every graph-changing decision is settled or the user says to proceed. Use the agent's own question tool, a one-page form, or plain text, whichever is lightest ([workflows/consult.md](workflows/consult.md#answer-surfaces)).
 3. **Gates where mistakes are expensive.** Put human gates in front of irreversible actions and promotion gates between lifecycles. Do not put gates anywhere else.
 4. **Topology follows the shape of the work.** Fan out only when the work splits into independent parts; keep sequential work sequential.
 5. **Fit the domain, never stop at the general case.** Build the domain model from the repository and the interview; use the facets as a checklist, not a template. Every step and "Done when" names the real commands, tools, metrics and artifacts of this domain. Physical safety rules win.
@@ -60,8 +60,9 @@ Read only what the current step needs.
 | [references/gates-and-lifecycles.md](references/gates-and-lifecycles.md) | Lifecycle labels, promotion gates, the discipline ratchet, human gates |
 | [references/graph-model.md](references/graph-model.md) | Node and edge semantics, topology rules, the playbook and profile frontmatter contracts the validator enforces, schema versions and migrations |
 | [references/authoring.md](references/authoring.md) | How to write the generated router and playbooks so agents follow them |
-| [templates/](templates/) | `router.md`, `playbook.md`, `principles.md`, `profile.md` skeletons |
+| [templates/](templates/) | `router.md`, `playbook.md`, `principles.md`, `profile.md` skeletons, and `interview-round.json`, the question-round spec |
 | [scripts/validate.mjs](scripts/validate.mjs) | Validator and graph renderer: `node scripts/validate.mjs <skill-dir> --write-graph` |
+| [scripts/interview.mjs](scripts/interview.mjs) | Renders a consult round as chat text, a one-page form, or a local form that returns the answers as JSON |
 | [scripts/flow.mjs](scripts/flow.mjs) | Runtime copied into every generated skill: run state, transitions, checks; CLI, MCP server and lifecycle hooks |
 | [references/rails.md](references/rails.md) | What the runtime enforces, the standards it follows, how to install it per agent, and the limits of enforcement |
 | [references/calibration.md](references/calibration.md) | Worked excerpts showing how concrete a domain model, a playbook and its rails should be |
