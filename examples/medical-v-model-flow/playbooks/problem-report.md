@@ -23,8 +23,8 @@ Resolve a problem report at its root cause, with risk assessment and traceabilit
 2. Assess its risk class and the affected SRS items.
 3. Find the root cause.
 4. Write a failing test that captures it, then fix the root cause with the smallest change.
-5. Show the test passing and the suites green; merge with two reviews.
-6. Update `docs/trace.csv` and the report with the fix and evidence.
+5. Show the test passing and the suites green; merge with ${review-rule}.
+6. Update `${trace-matrix}` and the report with the fix and evidence.
 
 ## Done when
 

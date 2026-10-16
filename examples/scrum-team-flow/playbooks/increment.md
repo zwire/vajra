@@ -5,9 +5,9 @@ phase: expand
 lifecycle: tracer
 kind: work
 checks:
-  - pnpm test
-  - pnpm lint
-  - pnpm typecheck
+  - ${test}
+  - ${lint}
+  - ${typecheck}
 exits:
   - to: api-change
     when: the story changes the public REST API
@@ -21,20 +21,20 @@ exits:
 
 ## Purpose
 
-Turn one committed story into a reviewed, tested change on `main`.
+Turn one committed story into a reviewed, tested change on `${default-branch}`.
 
 ## Steps
 
 1. Restate the story's acceptance criteria as observable behavior.
 2. Implement the smallest change that satisfies them on a feature branch.
 3. Write or update tests that pin the new behavior.
-4. Run `pnpm test`, `pnpm lint` and `pnpm typecheck`.
+4. Run `${test}`, `${lint}` and `${typecheck}`.
 5. Open a GitHub pull request linking the story; drive CI to green.
-6. Get one approving review, then merge to `main`.
+6. Get one approving review, then merge to `${default-branch}`.
 
 ## Done when
 
-- Every acceptance criterion is shown met on `https://staging.example.com` or in a test, `pnpm test` is green in CI, and the PR is merged with an approving review.
+- Every acceptance criterion is shown met on `${staging-url}` or in a test, `${test}` is green in CI, and the PR is merged with an approving review.
 
 ## Reply with
 

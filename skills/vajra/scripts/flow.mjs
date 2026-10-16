@@ -26,10 +26,14 @@
 //                                                 lifecycle hook (JSON on stdin)
 //   flow install --harness <claude|codex|cursor|copilot|antigravity|qwen|factory|windsurf>[,...]
 //                [--scope project|local] [--mcp] [--dry-run]
+//                                                 hooks, plus a .flow/<skill>/project.md skeleton
+//                                                 for the skill's bindings when there is none
 //   flow mcp                                      opt-in MCP server over stdio (gates via elicitation)
 //
 // Exit codes: 0 ok, 1 refused by the graph, 2 usage, 3 interrupted for the human.
 // Environment: FLOW_ROOT (project root), FLOW_SKILL (skill directory; default: the parent of scripts/).
+// Project values: the skill names commands, paths and other repository-specific values as ${name}
+// bindings (declared in its bindings.md); each project gives them in .flow/<skill>/project.md.
 // No dependencies: Node 18+ only. Needs validate.mjs next to it.
 
 import fs from "node:fs";
@@ -37,7 +41,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { validateSkill, commandMatches, guardMatches, shellCommands, programName, commandStart, globToRegExp, VERSION } from "./validate.mjs";
+import { validateSkill, commandMatches, guardMatches, shellCommands, programName, commandStart, globToRegExp, readProject, projectFile, resolveText, resolveList, VERSION } from "./validate.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(process.env.FLOW_SKILL || path.join(here, ".."));
@@ -65,9 +69,31 @@ export function findRoot(start = process.cwd()) {
   }
 }
 
-function loadGraph() {
+// The graph with this project's bindings filled in. Unbound names stay as written (so a `writes`
+// glob matches nothing) and are listed in `unbound`; runs cannot start until the project binds them.
+function loadGraph(root) {
   const r = validateSkill(skillDir);
-  return { ok: r.ok, errors: r.errors, nodes: new Map(r.nodes.map((n) => [n.id, n])), entries: r.entries, profile: r.profile || {} };
+  const file = projectFile(root, skillName);
+  const { values, problems } = readProject(file);
+  const missing = new Set();
+  const nodes = r.nodes.map((n) => ({
+    ...n,
+    checks: resolveList(n.checks, values, missing),
+    writes: resolveList(n.writes, values, missing),
+    guards: resolveList(n.guards, values, missing),
+    steps: n.steps.map((s) => ({ ...s, text: resolveText(s.text, values, missing) })),
+    doneWhen: resolveText(n.doneWhen, values, missing),
+    used: n.bindings.map((b) => [b, values.get(b)]),
+  }));
+  // Guarded commands whose binding has no value cannot be recognized, so the hooks fail closed.
+  const guardGap = new Set();
+  for (const n of r.nodes) resolveList(n.guards, values, guardGap);
+  for (const name of Object.keys(r.bindings || {})) if (!values.has(name)) missing.add(name);
+  const errors = [...r.errors, ...problems.map((p) => `${path.relative(root, file)}: ${p}`)];
+  return {
+    ok: errors.length === 0, errors, nodes: new Map(nodes.map((n) => [n.id, n])), entries: r.entries, profile: r.profile || {},
+    bindings: r.bindings || {}, unbound: [...missing].sort(), unboundGuards: [...guardGap].sort(), projectFile: path.relative(root, file).split(path.sep).join("/"),
+  };
 }
 
 function openStore(root) {
@@ -160,12 +186,23 @@ function describe(g, state, root) {
   if (!g.ok) return `${tag} The workflow graph is invalid, so the rails are off until it validates: ${g.errors[0]}`;
   if (state.suspended) return `${tag} Rails suspended by the user.`;
   const run = state.run;
+  if (g.unbound.length) {
+    const what = g.unbound.map((n) => `${n} (${g.bindings[n] || "not declared in bindings.md"})`).join("; ");
+    const note = `${tag} This project has not bound ${what}. The user writes the values in ${g.projectFile}; until then no run can start.`;
+    if (!run) return note;
+    return `${note}\n${describeRun(g, state, root)}`;
+  }
   if (!run) {
     const how = `match it to a playbook in SKILL.md and run \`${flowCmd(root)} start <playbook> --request "<one line>"\``;
     // An explicit skill must not pull unrelated work onto its rails; strict rails need a run to edit at all.
     if (g.profile.invocation === "explicit" && g.profile.rails !== "strict") return `${tag} No playbook is active. Use this workflow only when the user asks for it by name; then ${how}. Other work needs no playbook.`;
     return `${tag} No playbook is active. To work on a task with this workflow, ${how}.`;
   }
+  return describeRun(g, state, root);
+}
+
+function describeRun(g, state, root) {
+  const run = state.run;
   const node = g.nodes.get(run.playbook);
   const done = node.steps.filter((s) => RESOLVED.has(run.steps[s.n].status)).length;
   return `${tag} Active playbook: ${node.id} (${done}/${node.steps.length} steps recorded) for "${run.request}". Next: ${nextHint(node, run, root)}.`;
@@ -184,6 +221,8 @@ function statusText(g, state, root) {
     const note = waiting ? "  ← waiting for the human" : st.evidence ? `  — ${st.evidence}` : st.reason ? `  — ${st.reason}` : "";
     lines.push(`  ${waiting ? "[?]" : mark[st.status]} ${s.n}. ${s.text}${note}`);
   }
+  const bound = node.used.filter(([, v]) => v);
+  if (bound.length) lines.push(`Bindings (from ${g.projectFile}): ${bound.map(([b, v]) => `\${${b}} = ${v.map((x) => `\`${x}\``).join(", ")}`).join("; ")}`);
   if (node.checks.length) lines.push(`Checks: ${node.checks.map((c) => `\`${c}\``).join(", ")}${run.checks ? ` → ${run.checks.pass ? "pass" : "FAIL"}` : ""}`);
   lines.push(`Exits: ${node.exits.map((e) => `${e.to}${e.on ? ` [on ${e.on}]` : ""} — ${e.when}`).join("; ") || "(terminal)"}`);
   if (run.history.length) lines.push(`Path so far: ${run.history.map((h) => h.playbook).join(" → ")} → ${node.id}`);
@@ -220,6 +259,7 @@ function needRun(state) {
 
 function cmdStart(g, state, st, [id], o) {
   if (!id) throw new Stop("usage: flow start <playbook> --request \"<one line>\"", 2);
+  if (g.unbound.length) refuse(`this project has not bound ${g.unbound.join(", ")}; ask the user to write them in ${g.projectFile} (what each one means is in the skill's bindings.md)`);
   if (state.run) {
     if (!o.abandon) refuse(`a run is active (playbook ${state.run.playbook}). Finish it and take an exit, or pass --abandon "<reason>"`);
     st.log({ event: "abandon", run: state.run.id, playbook: state.run.playbook, reason: o.abandon });
@@ -443,6 +483,25 @@ function install(root, o) {
     }
   }
 
+  // The project's values for the skill's bindings: a skeleton the user fills in, never overwritten.
+  const proj = path.relative(root, projectFile(root, skillName)).split(path.sep).join("/");
+  const declared = Object.entries(loadGraph(root).bindings);
+  if (declared.length && !fs.existsSync(path.join(root, proj))) {
+    writes.set(proj, [
+      "---",
+      `# Values of ${skillName}'s bindings for this repository (see the skill's bindings.md).`,
+      "# A value is a string, or a list [a, b] for several globs or commands. Empty means unbound.",
+      ...declared.flatMap(([k, d]) => [`# ${d}`, `${k}: ""`]),
+      "---",
+      "",
+      "# Project notes",
+      "",
+      "Facts about this repository the workflow relies on: toolchain, where data and artifacts live, who approves what.",
+      "",
+    ].join("\n"));
+    report.push(`project: wrote ${proj}; fill in every value before the first run`);
+  }
+
   const out = [];
   for (const [file, content] of writes) {
     const text = typeof content === "string" ? content : JSON.stringify(content, null, 2) + "\n";
@@ -450,7 +509,7 @@ function install(root, o) {
     else { fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); fs.writeFileSync(path.join(root, file), text); }
   }
   if (o["dry-run"]) return out.join("\n");
-  return `${report.join("\n")}\nRun state lives in .flow/${skillName}/; commit it for an audit trail or add .flow/ to .gitignore.`;
+  return `${report.join("\n")}\nRun state lives in .flow/${skillName}/. Commit ${proj}; commit the rest for an audit trail, or ignore .flow/*/state.json, .flow/*/log.jsonl and .flow/*/runs/.`;
 }
 
 // ---------- lifecycle hooks (tool-agnostic) ----------
@@ -686,6 +745,21 @@ export function shellViolation(command, ps, ctx) {
   return ["human", "rails", "clean", "state"].find((v) => found.has(v)) || null;
 }
 
+// A line made only of reading commands (and flow.mjs agent commands), for when guards are unbound.
+function readOnly(command, ps) {
+  const { cmds, failed } = shellCommands(command, { ps });
+  if (failed) return false;
+  return cmds.every((w) => {
+    const k = commandStart(w), name = programName(w[k].text), args = w.slice(k + 1);
+    if (w.some((x) => x.redir)) return false;
+    if (name === "node" && args[0] && programName(args[0].text) === "flow.mjs") return true;
+    if (name === "git") return GIT_READS.has(args.find((x) => !/^-/.test(x.text))?.text) && !["add", "commit"].includes(args.find((x) => !/^-/.test(x.text))?.text);
+    if (["echo", "printf", "pwd", "true"].includes(name)) return true;
+    const flags = READERS.get(name);
+    return READERS.has(name) && !(flags && args.some((x) => flags.test(x.text)));
+  });
+}
+
 const RAILS_MSG = "the workflow's own rules (its playbooks, profile and scripts) and the hooks that enforce them change only while the user has suspended the rails. Stop and ask the user to run `flow suspend` first.";
 
 // Whether an edit of a hook settings file removes a flow.mjs hook or turns hooks off.
@@ -711,6 +785,7 @@ function preToolUse(g, state, input, root) {
     for (const fp of act.paths) {
       const abs = path.resolve(input.cwd || root, fp);
       const rel = path.relative(root, abs).split(path.sep).join("/");
+      if (lc(rel) === lc(g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the user has suspended the rails. Stop and ask the user to run \`flow suspend\` first, or to edit the file themselves.`;
       if (/^\.flow(\/|$)/i.test(rel)) return "the run state is written only by flow.mjs.";
       if (inside(abs, rp.skill)) return RAILS_MSG;
       if (rp.configs.some((q) => lc(q) === lc(abs)) && dropsHooks(abs, act)) return RAILS_MSG;
@@ -732,7 +807,10 @@ function preToolUse(g, state, input, root) {
     if (v === "human") return "only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.";
     if (v === "rails") return RAILS_MSG;
     if (v === "clean") return "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.";
-    if (v === "state") return "the run state in .flow/ is changed only through flow.mjs (reading it with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
+    if (v === "state") return "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
+    if (g.unboundGuards.length && !readOnly(cmd, act.ps)) {
+      return `guarded commands use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")}, which ${g.projectFile} does not bind, so they cannot be told apart from other commands. Only reading commands run until the user fills in those values.`;
+    }
     for (const node of g.nodes.values()) {
       for (const pat of node.guards) {
         if (!guardMatches(pat, cmd, { ps: act.ps })) continue;
@@ -778,7 +856,7 @@ function context(input, text, format) {
 function runHook(event, format) {
   const input = normalizePayload(readStdin());
   const root = findRoot(input.cwd || process.cwd());
-  const g = loadGraph();
+  const g = loadGraph(root);
   const st = openStore(root);
   const state = st.load();
   if (event === "session-start") { console.log(context(input, describe(g, state, root), format)); return 0; }
@@ -857,7 +935,7 @@ function parseArgs(argv) {
 export function execute(cmd, pos = [], o = {}, root = findRoot()) {
   const st = openStore(root);
   const state = st.load();
-  const g = loadGraph();
+  const g = loadGraph(root);
   try {
     if (cmd === "install") return { code: 0, text: install(root, o) };
     if (cmd === "log") return { code: 0, text: cmdLog(st) };

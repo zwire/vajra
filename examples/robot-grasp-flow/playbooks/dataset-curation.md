@@ -4,9 +4,9 @@ title: Dataset curation
 phase: expand
 lifecycle: tracer
 kind: work
-writes: [data/grasp_dataset/**, docs/datasheets/**]
+writes: [${dataset}/**, ${datasheets}/**]
 checks:
-  - python3 tools/check_split.py data/grasp_dataset --by session
+  - ${check-split} ${dataset} --by session
 exits:
   - to: increment
     when: the dataset is versioned and its split is documented
@@ -28,7 +28,7 @@ Collect and label the images the detector needs, with a held-out set that stays 
 
 ## Done when
 
-- `docs/datasheets/<version>.md` exists, the label spot-check agrees on at least 98% of boxes, and `tools/check_split.py` confirms no recording session spans two splits.
+- `${datasheets}/<version>.md` exists, the label spot-check agrees on at least 98% of boxes, and `${check-split}` confirms no recording session spans two splits.
 
 ## Reply with
 

@@ -72,7 +72,7 @@ It reads your repository, asks you a few short rounds of multiple-choice questio
 **3. Turn on the rails.** At the end it offers to install the hooks for the agents your project uses. You can also do it yourself:
 
 ```bash
-node .agents/skills/your-flow/scripts/flow.mjs install --harness claude,codex,cursor,copilot,antigravity,qwen,factory,windsurf   # any subset
+node <your-flow>/scripts/flow.mjs install --harness claude,codex,cursor,copilot,antigravity,qwen,factory,windsurf   # any subset
 ```
 
 **4. Work.** Invoke your new skill by name with a task, for example `/your-flow add CSV export to invoices`. The agent picks the playbook and drives the run.
@@ -86,12 +86,14 @@ node .agents/skills/your-flow/scripts/flow.mjs install --harness claude,codex,cu
 | Start a task on the workflow | Invoke your skill by name with the task |
 | Pass a human gate | When the agent stops at a gate, reply `approve` (optionally with a note) |
 | Refuse a gate | Reply `reject <reason>`; the agent takes the exit that fits |
-| See where the run is | `node .agents/skills/your-flow/scripts/flow.mjs status` |
-| See what happened | `node .agents/skills/your-flow/scripts/flow.mjs log` |
-| Approve from your terminal instead | `node .agents/skills/your-flow/scripts/flow.mjs approve --by <you>` |
+| See where the run is | `node <your-flow>/scripts/flow.mjs status` |
+| See what happened | `node <your-flow>/scripts/flow.mjs log` |
+| Approve from your terminal instead | `node <your-flow>/scripts/flow.mjs approve --by <you>` |
 | Pause the hooks for a while | `flow.mjs suspend`, later `flow.mjs unsuspend` |
 
-The agent's side (`flow start`, `step`, `finish`, `exit`) is written into your skill's `SKILL.md`, so you never type it. Run state and history live in `.flow/your-flow/`; commit them for an audit trail or add `.flow/` to `.gitignore`.
+The agent's side (`flow start`, `step`, `finish`, `exit`) is written into your skill's `SKILL.md`, so you never type it. Your repository's commands and paths live in `.flow/your-flow/project.md`; commit it. Run state and history live next to it; commit them for an audit trail or ignore `.flow/*/state.json`, `log.jsonl` and `runs/`.
+
+To reuse the skill in another repository of the same kind, copy the skill and run `flow.mjs install` there: it writes a `project.md` skeleton listing every binding the skill needs. Fill in the values; runs refuse to start until every one is set.
 
 ### Modes of vajra
 
@@ -125,6 +127,7 @@ vajra fixes both. It builds the graph **around you**, and **enforces** it.
 ## Highlights
 
 - **🛤️ Rails, not reminders.** Every generated skill carries `flow.mjs`, a zero-dependency runtime. It tracks which playbook owns the request and refuses exits the graph does not have. It runs each playbook's checks before any exit opens, and red checks route the run down the failure exit. Installed as lifecycle hooks, it blocks guarded irreversible commands until a human approves, limits edits to the active playbook's paths, and keeps the agent from touching its own run state.
+- **♻️ Reusable across repositories.** The skill holds your way of working and your domain, never one repository. Commands, paths, URLs and other values of one repository are bindings (`${test}`, `${code}/**`), declared in the skill's `bindings.md` and given per project in `.flow/<skill>/project.md`. The validator rejects literal rails values and warns on repository paths anywhere in the skill.
 - **🧩 No lock-in.** The generated skill is plain Agent Skills with spec-only frontmatter and no links outside itself. The runtime is a CLI any agent can run, and the hooks use the protocol current agents share (JSON on stdin, exit code 2 blocks). One command installs them for Claude Code, Codex, Cursor, GitHub Copilot (CLI, cloud agent and VS Code), Antigravity (CLI, IDE and app), Qwen Code, Factory Droid or Windsurf.
 - **🎯 Fits your domain, not a preset.** There are no "web" or "robotics" packs. vajra builds a domain model for you, split into areas as finely as the graph needs. It uses ten cross-cutting facets (measured outcome, stand-in ladder, physical world, data mutation…) as a checklist. The validator flags any playbook whose steps or "Done when" name nothing real.
 - **🔥 It grills you before it builds, lightly.** It asks short rounds of choices, each pre-set to a recommendation, through your agent's own question tool, a one-page form, or plain text. It pushes back on process you would never run and on safeguards you forgot.
@@ -239,7 +242,7 @@ $ (agent) abctl ramp search-ranker-0412 --percent 50
 Three levels (`advisory`, `standard`, `strict`) come from your profile. Install the hooks for the agents you use:
 
 ```bash
-node .agents/skills/your-flow/scripts/flow.mjs install --harness claude,codex,cursor,copilot,antigravity,qwen,factory,windsurf   # any subset
+node <your-flow>/scripts/flow.mjs install --harness claude,codex,cursor,copilot,antigravity,qwen,factory,windsurf   # any subset
 ```
 
 The [rails reference](skills/vajra/references/rails.md) spells out what is enforced, and also where enforcement ends: choices between legal exits remain the agent's judgment, and an agent without hooks is held only by the runtime it drives.
@@ -332,7 +335,7 @@ stateDiagram-v2
   class hardened hardened
 ```
 
-**The domain model decides the work.** It is built for you, not picked from a list. Areas are split only as finely as the graph needs: perception and motion on a robot, the ranking model and the serving path in search. Each area gets its [facets](skills/vajra/references/facets/README.md), an evidence ladder from cheapest to real, the irreversible actions with their exact commands, lead times and vocabulary. Each facet says where those facts must show up: which evidence, which gates, which guarded commands. The facts themselves come from your repository and your answers. Physical safety rules always win.
+**The domain model decides the work.** It is built for you, not picked from a list. Areas are split only as finely as the graph needs: perception and motion on a robot, the ranking model and the serving path in search. Each area gets its [facets](skills/vajra/references/facets/README.md), an evidence ladder from cheapest to real, the irreversible actions with their commands, lead times and vocabulary. Each facet says where those facts must show up: which evidence, which gates, which guarded commands. The facts themselves come from your repository and your answers. Physical safety rules always win.
 
 ### What you get
 
@@ -342,13 +345,16 @@ your-flow/
 ├── playbooks/*.md    nodes: steps, "Done when", exits, plus checks / writes / irreversible rails
 ├── principles.md     only the principles your graph needs
 ├── profile.md        your profile (machine-readable), domain model, interview log
+├── bindings.md       the repository values the skill needs, by name (${test}, ${code}, ${deploy})
 ├── graph.md          Mermaid graph, rendered by the validator
 └── scripts/
     ├── flow.mjs      the runtime: CLI, lifecycle hooks, optional MCP server
     └── validate.mjs  the validator (also used by the runtime)
+
+.flow/your-flow/project.md   per repository, outside the skill: the values and the repository facts
 ```
 
-A playbook's frontmatter is both the graph and its rails:
+A playbook's frontmatter is both the graph and its rails, with this repository's values as bindings:
 
 ```yaml
 ---
@@ -358,7 +364,7 @@ phase: expand
 lifecycle: tracer
 kind: work
 checks:
-  - python -m rankeval shadow --model shadow --since 24h --max-p99-ms 40 --max-error-rate 0.001
+  - ${shadow-check}
 exits:
   - to: ab-ramp
     when: 24 hours of shadow traffic stayed within the budget
@@ -369,10 +375,15 @@ exits:
 ---
 ```
 
+```yaml
+# .flow/search-ranking-flow/project.md
+shadow-check: python -m rankeval shadow --model shadow --since 24h --max-p99-ms 40 --max-error-rate 0.001
+```
+
 ## The validator
 
 ```bash
-node skills/vajra/scripts/validate.mjs path/to/your-flow --write-graph
+node skills/vajra/scripts/validate.mjs path/to/your-flow [--project path/to/repo] --write-graph
 ```
 
 | Checks | Severity |
@@ -382,6 +393,8 @@ node skills/vajra/scripts/validate.mjs path/to/your-flow --write-graph
 | Work entering a promotion gate below the gate's level (throwaway code at a production gate) | error |
 | `[irreversible]` steps without a preceding `[human-gate]` | error |
 | Invalid or unsupported frontmatter, malformed rails, empty required sections, schema version mismatch | error |
+| Rails values written as literals instead of bindings; bindings used but not declared; with `--project`, bindings the project leaves unset | error |
+| Paths, globs or URLs of one repository anywhere in the skill | warning |
 | Router invocation that contradicts the profile | error |
 | Steps or "Done when" that name nothing concrete; a missing domain model | warning |
 | Irreversible steps without guarded commands; kept code without checks; rails too weak for the risk | warning |

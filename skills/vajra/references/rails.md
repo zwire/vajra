@@ -36,6 +36,8 @@ The interfaces are standards current coding agents share:
 
 State lives in `.flow/<skill>/` at the project root: `state.json` (the active run), `log.jsonl` (every event, append-only) and `runs/` (finished and abandoned runs). Commit it for an audit trail, or ignore it.
 
+The same directory holds `project.md`, this repository's values for the skill's bindings (see [graph-model.md](graph-model.md#bindings)). The skill names no repository; the runtime reads `project.md` and fills the values into checks, guarded commands, write limits and the step text `flow status` shows. Commit it. A run cannot start while a binding has no value, so a copied skill never runs with another project's commands.
+
 ```
 start <entry> --request "…"      only router entries; one run at a time (--abandon "<reason>" to replace it)
 step <n> --evidence "…"          or --skip "<reason>"; steps behind an unapproved human gate are refused
@@ -54,7 +56,7 @@ When the agent reaches a `[human-gate]` step, `flow step <n>` interrupts the run
 - runs `node <skill>/scripts/flow.mjs approve` (or `reject --reason …`) in their own terminal; or
 - answers the elicitation dialog, when the optional MCP server is installed and the client supports elicitation.
 
-The tool hook blocks the agent from running `approve`, `reject`, `suspend` or `unsuspend`, and `flow.mjs hook` or `mcp` (which a forged prompt or elicitation answer could use to approve), and from changing `.flow/` directly. Reading `.flow/` with `cat`, `jq`, `grep`, `Get-Content` and the like is allowed. The skill's own files (playbooks, profile, scripts) and the hook settings that enforce them change only while the human has run `flow suspend`, so the agent cannot switch its rails off; other edits to the settings files are allowed as long as they keep the `flow.mjs` hooks and do not set `disableAllHooks`. A rejected gate skips the steps behind it; the agent finishes the playbook and takes the exit that fits.
+The tool hook blocks the agent from running `approve`, `reject`, `suspend` or `unsuspend`, and `flow.mjs hook` or `mcp` (which a forged prompt or elicitation answer could use to approve), and from changing `.flow/` directly, which covers the project bindings in `project.md`: loosening a `writes` glob or emptying a guarded command there would loosen the rails. Reading `.flow/` with `cat`, `jq`, `grep`, `Get-Content` and the like is allowed. The skill's own files (playbooks, profile, scripts) and the hook settings that enforce them change only while the human has run `flow suspend`, so the agent cannot switch its rails off; other edits to the settings files are allowed as long as they keep the `flow.mjs` hooks and do not set `disableAllHooks`. A rejected gate skips the steps behind it; the agent finishes the playbook and takes the exit that fits.
 
 ## Rails levels
 
@@ -90,7 +92,7 @@ The hook command and its behavior are the same for every agent; only the configu
 | `factory` | `.factory/hooks.json` if it exists, else `.factory/settings.json` | SessionStart, UserPromptSubmit, PreToolUse, Stop | by hand |
 | `windsurf` | `.devin/hooks.json` if it exists, else `.windsurf/hooks.json` | pre_user_prompt, pre_run_command, pre_write_code | by hand |
 
-Installing merges entries without touching anything else and is idempotent. The hook reads the payload fields these agents share (`cwd`, `tool_name`, `tool_input`, `prompt`, `hook_event_name`). It recognizes their shell tools (`Bash`, `Shell`, `run_shell_command`, `Execute`, `run_in_terminal`, …) and edit tools (`Edit`, `Write`, `Create`, `write_file`, `replace`, `replace_string_in_file`, `apply_patch`, …). Windsurf (`agent_action_name`, `tool_info`) and Antigravity (`workspacePaths`, `toolCall` with `CommandLine` / `TargetFile`) send their own payloads, which the hook translates.
+Installing merges entries without touching anything else and is idempotent. When the project has no `.flow/<skill>/project.md` yet, it also writes a skeleton listing each binding with its description; fill in every value before the first run. It never overwrites an existing project file. The hook reads the payload fields these agents share (`cwd`, `tool_name`, `tool_input`, `prompt`, `hook_event_name`). It recognizes their shell tools (`Bash`, `Shell`, `run_shell_command`, `Execute`, `run_in_terminal`, …) and edit tools (`Edit`, `Write`, `Create`, `write_file`, `replace`, `replace_string_in_file`, `apply_patch`, …). Windsurf (`agent_action_name`, `tool_info`) and Antigravity (`workspacePaths`, `toolCall` with `CommandLine` / `TargetFile`) send their own payloads, which the hook translates.
 
 An agent not in the table can still use the rails: point its hook mechanism at `node <skill>/scripts/flow.mjs hook <session-start|user-prompt|pre-tool-use|stop>`. If it has no hooks, the runtime still enforces everything in the run section when the agent drives runs through the CLI, as the router tells it to.
 

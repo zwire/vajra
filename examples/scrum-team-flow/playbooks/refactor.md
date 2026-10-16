@@ -18,7 +18,7 @@ Change structure without changing behavior.
 ## Steps
 
 1. Pin current behavior with tests or characterization tests before changing anything.
-2. Change structure in small commits, running `pnpm test` after each.
+2. Change structure in small commits, running `${test}` after each.
 3. Confirm behavior is unchanged with the same evidence as step 1.
 4. Merge through a reviewed PR.
 

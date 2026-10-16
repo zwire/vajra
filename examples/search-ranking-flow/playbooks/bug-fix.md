@@ -5,8 +5,8 @@ phase: any
 lifecycle: any
 kind: service
 checks:
-  - pytest ranker/tests
-  - go test ./serving/...
+  - ${ranker-test}
+  - ${serving-test}
 exits:
   - to: shadow-validation
     when: the fix changes ranking or serving behavior
@@ -22,7 +22,7 @@ Fix a ranking or serving defect at its root cause. If users are affected now, ro
 
 ## Steps
 
-1. If users are affected, run `abctl rollback search-ranker-<id>` or `make serving-rollback` (both reversible) and confirm on the "search-latency" board.
+1. If users are affected, run `${rollback} ${ab-experiment}` or `${serving-rollback}` (both reversible) and confirm on `${latency-board}`.
 2. Reproduce the defect with a query and a captured request, and save them as a failing test.
 3. Find the root cause, not the first place it shows.
 4. Fix it with the smallest change and show the failing test passing.

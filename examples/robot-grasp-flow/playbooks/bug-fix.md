@@ -23,7 +23,7 @@ Fix a defect at its root cause, with proof from bags or simulation.
 2. Find the root cause, not the first place it shows.
 3. Write a failing test that replays the defect.
 4. Fix the root cause with the smallest change.
-5. Show the failing case passing and `colcon test` green.
+5. Show the failing case passing and `${test}` green.
 
 ## Done when
 

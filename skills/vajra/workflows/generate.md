@@ -22,7 +22,7 @@ Before asking anything, look at what already answers profile and domain question
 - Domain signals: simulators, launch files, datasets and data directories, notebooks, benchmarks, golden files, device configs, migration tools, store or registry configs, the words in READMEs and issue titles.
 - Maturity signals: tests present or absent, release tags, monitoring config, number of contributors.
 
-Record each inferred value with its evidence (file path or command output).
+Record each inferred value with its evidence (file path or command output). Values that belong to this repository (commands, paths, URLs, branch names, tracker keys, dashboards) will become [bindings](../references/graph-model.md#bindings): the skill names them as `${name}`, and the values go in the project file `.flow/<name>/project.md`.
 
 ## 3. Draft the style profile and domain model
 
@@ -40,7 +40,7 @@ This is a draft. Do not ask questions yet.
 
 Run [consult.md](consult.md) on the draft: short rounds of choices pre-set to your recommendations, on the lightest [answer surface](consult.md#answer-surfaces) the agent has, dependencies first, challenging both unnecessary process and missing safeguards. Push the domain model until every field is concrete enough to write a step with a real command or artifact in it. It ends with a proposed playbook list the user has accepted (or told you to go ahead with).
 
-Write the final profile using [../templates/profile.md](../templates/profile.md): axis values (including `facets` and `rails`) in the frontmatter; sources, the domain model and the consult log in the body. Fill `generator` from `node scripts/validate.mjs --version`.
+Write the final profile using [../templates/profile.md](../templates/profile.md): axis values (including `facets` and `rails`) in the frontmatter; sources, the domain model and the consult log in the body, with repository values as bindings. Fill `generator` from `node scripts/validate.mjs --version`.
 
 ## 5. Compose the graph
 
@@ -50,11 +50,11 @@ Read [../references/composition.md](../references/composition.md) and apply it i
 2. Add **service playbooks** the profile calls for (bug fix, investigation, refactor, QA, incident, retro).
 3. Apply the **domain model**: rewrite steps and evidence in the domain's terms, add the playbooks the facets call for, collect irreversible actions and their commands.
 4. Add **gates**: promotion gates between lifecycles the journey crosses (with `promotes`); human gates before irreversible steps; gate strictness from the failure-cost axis.
-5. Set **parameters** per playbook: timeboxes, verification posture, parallelism, autonomy checkpoints, concrete commands from the toolchain.
-6. Lay the **rails**: `checks`, `writes`, `irreversible` patterns and `on: pass|fail` exits per playbook; the `rails` level.
+5. Set **parameters** per playbook: timeboxes, verification posture, parallelism, autonomy checkpoints, the toolchain's commands as bindings.
+6. Lay the **rails**: `checks`, `writes`, `irreversible` patterns (all through bindings) and `on: pass|fail` exits per playbook; the `rails` level.
 7. **Prune**: remove every playbook, step and gate that no profile value justifies. Merge playbooks that would always run back to back.
 
-Copy blueprints from [../references/blueprints/](../references/blueprints/README.md). Blueprints are generic on purpose: they are skeletons, not output. Rename steps into the user's vocabulary, replace every generic phrase with the domain model's real commands and evidence, and drop what does not apply.
+Copy blueprints from [../references/blueprints/](../references/blueprints/README.md). Blueprints are generic on purpose: they are skeletons, not output. Rename steps into the user's vocabulary, replace every generic phrase with the domain model's real commands (as bindings) and evidence, and drop what does not apply.
 
 Sketch the graph as a list of nodes and exits before writing files. Check it against [../references/graph-model.md](../references/graph-model.md#topology-rules).
 
@@ -65,6 +65,7 @@ Sketch the graph as a list of nodes and exits before writing files. Check it aga
   1. Where the user asked.
   2. The project skill directory the user's agents read: `.agents/skills/<name>/` is read by many agents; some use their own (for example `.claude/skills/<name>/`). Pick the one every agent in use can see, or ask.
   3. To share it as a package: `skills/<name>/` at the root of a repository, installable with `npx skills add <owner>/<repo>`.
+- The project file is always `.flow/<name>/project.md` at the project root, wherever the skill lives. A skill installed once for the user (for example in their home skill directory) serves every project that has its own project file.
 
 ## 7. Write the files
 
@@ -76,14 +77,19 @@ Follow [../references/authoring.md](../references/authoring.md). Produce:
 ├── principles.md     # from templates/principles.md, only principles the profile needs
 ├── profile.md        # frontmatter axes + domain model + consult log, so Evolve and the validator can reuse it
 ├── graph.md          # rendered by the validator, never written by hand
+├── bindings.md       # every repository-specific value the skill needs, by name, with what it must be
 ├── scripts/
 │   ├── flow.mjs      # copied unchanged from this skill's scripts/
 │   └── validate.mjs  # copied unchanged from this skill's scripts/
 └── playbooks/
     └── <id>.md       # one per node, from templates/playbook.md
+
+.flow/<name>/project.md   # at the project root, outside the skill: this repository's values and facts
 ```
 
-Set the router's invocation from the profile's `invocation` axis through the description only, so it works in every agent: `explicit` (default) says it runs only when invoked by name; `auto` writes a trigger-rich description. Keep the frontmatter to Agent Skills fields; add `compatibility: Requires Node.js 18+ for scripts/flow.mjs.` In the router's "How to run", write the real path to `flow.mjs` for the chosen location.
+The skill files name no repository: no path, glob, command, script, URL, branch name, tracker key, dashboard or threshold of one service. Write each as `${name}`, declare it in `bindings.md` from [../templates/bindings.md](../templates/bindings.md), and give its value in the project file from [../templates/project.md](../templates/project.md), whose body also takes the toolchain table and the repository facts behind the domain model. The test: copied into the next repository of the same kind, the skill should need only a new project file.
+
+Set the router's invocation from the profile's `invocation` axis through the description only, so it works in every agent: `explicit` (default) says it runs only when invoked by name; `auto` writes a trigger-rich description. Keep the frontmatter to Agent Skills fields; add `compatibility: Requires Node.js 18+ for scripts/flow.mjs.` Copy the router's "How to run" from the template; it names no install path, because the agent runs `scripts/flow.mjs` from the skill's own directory.
 
 Every playbook needs the frontmatter contract from [../references/graph-model.md](../references/graph-model.md#playbook-frontmatter-contract) and the sections `## Purpose`, `## Steps`, `## Done when`. Every gate that raises a lifecycle declares it with `promotes: from->to`.
 
@@ -92,10 +98,10 @@ Every playbook needs the frontmatter contract from [../references/graph-model.md
 Run, from this skill's directory:
 
 ```bash
-node scripts/validate.mjs <path-to-generated-skill> --write-graph
+node scripts/validate.mjs <path-to-generated-skill> --project <project-root> --write-graph
 ```
 
-Fix every `ERROR` and re-run until it prints `OK` (`graph.md` is only written once there are no errors). Treat each `WARN` as a prompt to prune, split or reconsider. Domain-fit warnings ("names no concrete evidence") mean the playbook failed the swap test: rewrite it. Leave a warning only with a reason recorded in `profile.md` under `## Composition notes`.
+Fix every `ERROR` and re-run until it prints `OK` (`graph.md` is only written once there are no errors). Treat each `WARN` as a prompt to prune, split or reconsider. Domain-fit warnings ("names no concrete evidence") mean the playbook failed the swap test: rewrite it. Portability warnings ("looks repository-specific") mean a value of this repository leaked into the skill: turn it into a binding. Leave a warning only with a reason recorded in `profile.md` under `## Composition notes`.
 
 ## 9. Dry-run one request on the rails
 
@@ -103,6 +109,7 @@ Pick a realistic request from the user's declaration and walk it through the gen
 
 ```bash
 export FLOW_ROOT="$(mktemp -d)"
+mkdir -p "$FLOW_ROOT/.flow/<name>" && cp .flow/<name>/project.md "$FLOW_ROOT/.flow/<name>/"
 node <skill>/scripts/flow.mjs start <entry> --request "<the request>"
 node <skill>/scripts/flow.mjs step 1 --evidence "dry run"
 # … record each step, finish, and take the exits the request would take
@@ -129,5 +136,6 @@ Reply with:
 - The rendered Mermaid graph from `graph.md`.
 - One line per playbook: what it is for.
 - The rails: level, guarded commands, write limits, checks, and for which agents the hooks are installed.
+- The bindings and their values in `.flow/<name>/project.md`, and that reusing the skill in another repository means copying the skill and writing a new project file (`flow install` writes a skeleton).
 - The profile values and domain model that most shaped the graph, and the assumptions you made instead of asking, so the user can correct them.
 - How to evolve it: "Run vajra again after a retro or when the project changes phase."
