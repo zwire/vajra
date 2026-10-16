@@ -234,7 +234,7 @@ $ (agent) abctl ramp search-ranker-0412 --percent 50
 | Human gates pass only by the human | The prompt hook records `approve` / `reject` from the human's message; the agent's attempts are blocked |
 | Irreversible commands wait for their gate | The tool hook matches `irreversible:` patterns and checks the gate before that exact step |
 | Throwaway stays throwaway | `writes: [scratch/**]` limits edits while a throwaway playbook is active |
-| The agent stays oriented | Current playbook and next move are injected at session start and on every prompt; stopping mid-playbook is bounced once |
+| The agent stays oriented | Current playbook and next move are injected at session start and on every prompt during a run; stopping mid-playbook is bounced once |
 
 Three levels (`advisory`, `standard`, `strict`) come from your profile. Install the hooks for the agents you use:
 

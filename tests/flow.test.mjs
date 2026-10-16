@@ -206,7 +206,11 @@ test("guards and protections match commands that run, not text that only mention
     'ssh prod "cd app && npm run deploy"',
     `node "${flow}" approve`,
     "ls > .flow/x",
-    'cat ".flow/demo-flow/state.json"',
+    'rm ".flow/demo-flow/state.json"',
+    "bash <<'EOF'\nnpm run deploy\nEOF",
+    "cat <<EOF | sudo sh\nnpm run deploy\nEOF",
+    'echo "npm run deploy" | bash',
+    'bash <<< "npm run deploy"',
     "echo 'unclosed npm run deploy",
   ]) assert.equal(p.bash(c).status, 2, c);
 });
@@ -272,7 +276,17 @@ test("writes are limited to the active playbook's paths, and state is protected"
   assert.match(p.write("src/app.js").stderr, /spike may only write scratch\/\*\*/);
   assert.equal(p.write("scratch/try.js").status, 0);
   assert.equal(p.write(".flow/demo-flow/state.json").status, 2);
-  assert.equal(p.bash("cat .flow/demo-flow/state.json").status, 2);
+  // Reading the state is fine; changing it is not.
+  assert.equal(p.bash("cat .flow/demo-flow/state.json").status, 0);
+  assert.equal(p.bash("jq .run .flow/demo-flow/state.json | head").status, 0);
+  assert.equal(p.bash("rm -rf .flow").status, 2);
+  assert.equal(p.bash("cat x > .flow/demo-flow/state.json").status, 2);
+  // A paused run frees edits for other work; guarded commands stay blocked.
+  p.cli("pause", "--note", "side task");
+  assert.equal(p.write("src/app.js").status, 0);
+  assert.equal(p.bash("npm run deploy").status, 2);
+  p.cli("resume");
+  assert.equal(p.write("src/app.js").status, 2);
 });
 
 test("strict rails block edits without a run; advisory rails block nothing", () => {
@@ -309,10 +323,14 @@ test("suspend turns the hooks off", () => {
   assert.equal(p.bash("npm run deploy").status, 2);
 });
 
-test("context is injected at session start and on every prompt", () => {
+test("context is injected at session start and on every prompt during a run", () => {
   const p = project();
   const ctx = (r) => JSON.parse(r.stdout).hookSpecificOutput;
-  assert.match(ctx(p.hook("session-start", { hook_event_name: "SessionStart" })).additionalContext, /No playbook is active/);
+  const start = ctx(p.hook("session-start", { hook_event_name: "SessionStart" })).additionalContext;
+  assert.match(start, /No playbook is active\. Use this workflow only when the user asks for it by name/);
+  // Without a run, prompts get nothing, so unrelated work is not pushed onto the workflow.
+  assert.equal(p.hook("user-prompt", { hook_event_name: "UserPromptSubmit", prompt: "fix the typo" }).stdout, "");
+  assert.match(ctx(project({ rails: "strict" }).hook("user-prompt", { prompt: "x" })).additionalContext, /To work on a task with this workflow/);
   p.cli("start", "spike", "--request", "try it");
   const out = ctx(p.hook("user-prompt", { hook_event_name: "UserPromptSubmit", prompt: "how is it going" }));
   assert.equal(out.hookEventName, "UserPromptSubmit");
@@ -451,7 +469,7 @@ test("Antigravity payloads and decisions", () => {
   p.cli("start", "spike", "--request", "try it");
   const allow = { decision: "allow" };
   assert.deepEqual(tool("run_command", { CommandLine: "ls", Cwd: p.proj }), allow, "an empty decision would deny");
-  assert.equal(tool("run_command", { CommandLine: "cat .flow/demo-flow/state.json", Cwd: p.proj }).decision, "deny");
+  assert.equal(tool("run_command", { CommandLine: "rm .flow/demo-flow/state.json", Cwd: p.proj }).decision, "deny");
   assert.match(tool("write_to_file", { TargetFile: path.join(p.proj, "src/app.js"), CodeContent: "x" }).reason, /^\[demo-flow\] Blocked: playbook spike may only write/);
   assert.equal(tool("replace_file_content", { TargetFile: path.join(p.proj, "src/app.js") }).decision, "deny");
   assert.deepEqual(tool("write_to_file", { TargetFile: path.join(p.proj, "scratch/a.js"), CodeContent: "x" }), allow);
