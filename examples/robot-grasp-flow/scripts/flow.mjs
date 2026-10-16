@@ -37,7 +37,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { validateSkill, commandMatches, globToRegExp, VERSION } from "./validate.mjs";
+import { validateSkill, commandMatches, guardMatches, shellCommands, globToRegExp, VERSION } from "./validate.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(process.env.FLOW_SKILL || path.join(here, ".."));
@@ -504,7 +504,9 @@ export function toolAction(input) {
   const ti = toolInput(input);
   if (SHELL_TOOLS.has(name) || (!name && (ti.command || input.command))) {
     const c = ti.command ?? input.command ?? "";
-    return { kind: "shell", command: Array.isArray(c) ? c.join(" ") : String(c) };
+    // An argv array is quoted back into one line, so `["bash", "-lc", "x y"]` keeps its script whole.
+    const quote = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`);
+    return { kind: "shell", command: Array.isArray(c) ? c.map((a) => quote(String(a))).join(" ") : String(c) };
   }
   if (name === "apply_patch" || name === "applypatch") return { kind: "edit", paths: patchPaths(ti) };
   if (EDIT_TOOLS.has(name)) {
@@ -539,11 +541,19 @@ function preToolUse(g, state, input, root) {
 
   if (act.kind === "shell") {
     const cmd = act.command;
-    if (/flow\.mjs["']?\s+(approve|reject|suspend|unsuspend)\b/.test(cmd)) return "only the user can approve, reject or suspend. Stop and ask them.";
-    if (/(^|[\s'"=:(/])\.flow(\/|\s|$|['")])/.test(cmd)) return "the run state in .flow/ is read and written only through flow.mjs (try `flow status` or `flow log`).";
+    // Read as shell, so a commit message or grep pattern that only mentions these is not blocked.
+    // A line that cannot be read is checked as plain text instead.
+    const cmds = shellCommands(cmd);
+    const words = cmds ? cmds.flat().map((w) => w.text) : null;
+    const humanOnly = cmds
+      ? cmds.some((w) => w.some((x, k) => /(^|\/)flow\.mjs$/.test(x.text) && /^(approve|reject|suspend|unsuspend)$/.test(w[k + 1]?.text || "")))
+      : /flow\.mjs["']?\s+(approve|reject|suspend|unsuspend)\b/.test(cmd);
+    if (humanOnly) return "only the user can approve, reject or suspend. Stop and ask them.";
+    const touchesState = words ? words.some((t) => /(^|[=:/])\.flow(\/|$)/.test(t)) : /(^|[\s'"=:(/])\.flow(\/|\s|$|['")])/.test(cmd);
+    if (touchesState) return "the run state in .flow/ is read and written only through flow.mjs (try `flow status` or `flow log`).";
     for (const node of g.nodes.values()) {
       for (const pat of node.guards) {
-        if (!commandMatches(pat, cmd)) continue;
+        if (!guardMatches(pat, cmd)) continue;
         if (!run || run.playbook !== node.id) return `\`${pat}\` is irreversible and runs only inside playbook ${node.id}, after its human gate. Current playbook: ${run ? run.playbook : "none"}.`;
         if (run.paused) return "the run is paused.";
         const step = guardedStep(node, run, pat);

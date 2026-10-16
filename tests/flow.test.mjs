@@ -182,6 +182,35 @@ test("guarded irreversible commands run only in their playbook after the gate", 
   assert.equal(q.bash("npm run deploy").status, 0);
 });
 
+test("guards and protections match commands that run, not text that only mentions them", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const flow = path.join(p.skill, "scripts", "flow.mjs");
+  // Mentions in quoted arguments, comments and heredoc bodies are data.
+  for (const c of [
+    'git commit -m "npm run deploy after review"',
+    "grep -rn 'npm run deploy' docs",
+    "echo npm run deploy",
+    "# npm run deploy\nls",
+    "cat <<'EOF' > scratch/NOTES.md\nnpm run deploy\n$(npm run deploy)\nEOF",
+    `git commit -m "document ${flow} approve and .flow/ state"`,
+  ]) assert.equal(p.bash(c).status, 0, c);
+  // Real executions are still caught, wherever they sit in the line.
+  for (const c of [
+    "npm test && npm run deploy",
+    "CI=1 sudo npm run deploy",
+    'bash -c "npm run deploy"',
+    "eval 'npm run deploy'",
+    'echo "$(npm run deploy)"',
+    "cat <<EOF\n$(npm run deploy)\nEOF",
+    'ssh prod "cd app && npm run deploy"',
+    `node "${flow}" approve`,
+    "ls > .flow/x",
+    'cat ".flow/demo-flow/state.json"',
+    "echo 'unclosed npm run deploy",
+  ]) assert.equal(p.bash(c).status, 2, c);
+});
+
 test("each guarded stage waits for its own gate", () => {
   const p = project();
   fs.writeFileSync(path.join(p.skill, "playbooks", "ship.md"), `---

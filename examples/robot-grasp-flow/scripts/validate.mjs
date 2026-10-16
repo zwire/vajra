@@ -70,6 +70,149 @@ export function commandMatches(pattern, command) {
   return re ? new RegExp(re[1], re[2]).test(cmd) : cmd.includes(pattern.replace(/\s+/g, " ").trim());
 }
 
+// ---------- shell commands (flow.mjs matches guards against these) ----------
+// A small POSIX-shell reader: splits a command line into the simple commands it would run, with
+// their words unquoted. Text that is only data (quoted arguments, comments, heredoc bodies) stays
+// inside one word or is dropped, while code the shell would run from inside it ($(...), `...`,
+// <(...), and the script of `sh -c`, `eval`, `ssh` and `watch`) is read as commands of its own.
+// Returns null when the line cannot be read (an unclosed quote, say), so callers can fail closed.
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "su"]);
+const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time"]);
+
+function closing(s, i, open, close) {
+  // i is just past `open`; returns the index of the matching `close`, skipping quotes and escapes.
+  for (let depth = 1; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\") i++;
+    else if (c === "'") { i = s.indexOf("'", i + 1); if (i < 0) break; }
+    else if (c === '"') { for (i++; i < s.length && s[i] !== '"'; i++) if (s[i] === "\\") i++; }
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) return i;
+  }
+  throw new Error("unclosed " + open);
+}
+
+// Commands substituted inside double quotes or an unquoted heredoc body.
+function substitutions(s, nested) {
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\") i++;
+    else if (s[i] === "$" && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")"); nested.push(s.slice(i + 2, e)); i = e; }
+    else if (s[i] === "`") { const e = s.indexOf("`", i + 1); if (e < 0) throw new Error("unclosed `"); nested.push(s.slice(i + 1, e)); i = e; }
+  }
+}
+
+function readShell(s, depth) {
+  const cmds = [], nested = [], heredocs = [];
+  let words = [], word = null, redir = false;
+  const flush = () => { if (word) { words.push(word); word = null; } };
+  const end = () => { flush(); if (words.length) cmds.push(words); words = []; redir = false; };
+  const add = (t, quoted) => { word ||= { text: "", quoted: false, redir }; word.text += t; word.quoted ||= quoted; redir = false; };
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\n") {
+      end();
+      for (const h of heredocs) {
+        const lines = [];
+        let j = i + 1;
+        for (;;) {
+          const nl = s.indexOf("\n", j), line = s.slice(j, nl < 0 ? s.length : nl);
+          j = nl < 0 ? s.length : nl + 1;
+          if ((h.tabs ? line.replace(/^\t+/, "") : line) === h.delim) break;
+          lines.push(line);
+          if (nl < 0) break;
+        }
+        if (!h.quoted) substitutions(lines.join("\n"), nested);
+        i = j - 1;
+      }
+      heredocs.length = 0;
+    } else if (c === " " || c === "\t") flush();
+    else if (c === "#" && !word) { const nl = s.indexOf("\n", i); i = (nl < 0 ? s.length : nl) - 1; }
+    else if (c === "\\") { if (s[i + 1] !== "\n") add(s[i + 1] ?? "", false); i++; }
+    else if (c === "'") { const e = s.indexOf("'", i + 1); if (e < 0) throw new Error("unclosed '"); add(s.slice(i + 1, e), true); i = e; }
+    else if (c === '"') {
+      let t = "", j = i + 1;
+      for (; j < s.length && s[j] !== '"'; j++) {
+        if (s[j] === "\\" && '"\\$`\n'.includes(s[j + 1])) t += s[++j];
+        else if (s[j] === "$" && s[j + 1] === "(") { const e = closing(s, j + 2, "(", ")"); t += s.slice(j, e + 1); j = e; }
+        else if (s[j] === "`") { const e = s.indexOf("`", j + 1); if (e < 0) throw new Error("unclosed `"); t += s.slice(j, e + 1); j = e; }
+        else t += s[j];
+      }
+      if (j >= s.length) throw new Error('unclosed "');
+      substitutions(t, nested);
+      add(t, true); i = j;
+    } else if (c === "$" && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")"); nested.push(s.slice(i + 2, e)); add(s.slice(i, e + 1), false); i = e; }
+    else if (c === "`") { const e = s.indexOf("`", i + 1); if (e < 0) throw new Error("unclosed `"); nested.push(s.slice(i + 1, e)); add(s.slice(i, e + 1), false); i = e; }
+    else if ((c === "<" || c === ">") && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")"); nested.push(s.slice(i + 2, e)); flush(); i = e; }
+    else if (c === "<" || c === ">") {
+      if (word && /^\d+$/.test(word.text) && !word.quoted) word = null; // 2>&1: the fd is not a word
+      flush();
+      const op = s.slice(i).match(/^(<<-|<<<|<<|<>|>>|>\||[<>]&?|&?>>?)/)[0];
+      i += op.length - 1;
+      if (op === "<<" || op === "<<-") {
+        const m = s.slice(i + 1).match(/^[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()]+))/);
+        if (!m) throw new Error("heredoc without delimiter");
+        heredocs.push({ delim: m[1] ?? m[2] ?? m[3], quoted: m[1] !== undefined || m[2] !== undefined || m[0].includes("\\"), tabs: op === "<<-" });
+        i += m[0].length;
+      } else redir = true;
+    } else if (c === "&" && s[i + 1] === ">") { flush(); i += s[i + 2] === ">" ? 2 : 1; redir = true; }
+    else if (";&|()".includes(c)) end();
+    else add(c, false);
+  }
+  end();
+  const out = [];
+  for (let w of cmds) {
+    while (w.length && !w[0].quoted && KEYWORDS.has(w[0].text)) w = w.slice(1);
+    if (!w.length) continue;
+    out.push(w);
+    if (depth >= 8) continue;
+    // Shells and wrappers that run a string as a command.
+    const base = (t) => t.split("/").pop();
+    const head = base(w[0].text);
+    for (let k = 0; k < w.length - 1; k++) {
+      if (SHELLS.has(base(w[k].text))) {
+        const c = w.findIndex((x, j) => j > k && /^-[a-z]*c[a-z]*$/i.test(x.text));
+        if (c > 0 && w[c + 1]) nested.push(w[c + 1].text);
+      }
+    }
+    if (head === "eval" || head === "watch") nested.push(w.slice(1).map((x) => x.text).join(" "));
+    if (head === "ssh") for (let k = 1; k < w.length; k++) nested.push(w.slice(k).map((x) => x.text).join(" "));
+  }
+  for (const n of nested) out.push(...(depth < 8 ? readShell(n, depth + 1) : []));
+  return out;
+}
+
+export function shellCommands(command) {
+  try { return readShell(String(command), 0); } catch { return null; }
+}
+
+// A command guard matches where a command, or a path to the program it runs, starts: at its first
+// word, at an unquoted later word (`sudo npm run deploy`, `bash scripts/release.sh`), or after a `/`
+// in one (`./scripts/release.sh`). A match that starts inside a quoted argument (a commit message,
+// a grep pattern) is data, not a command. Lines the reader cannot parse fall back to commandMatches.
+export function guardMatches(pattern, command) {
+  const cmds = shellCommands(command);
+  if (!cmds) return commandMatches(pattern, command);
+  const re = pattern.match(/^\/(.+)\/([a-z]*)$/);
+  const sticky = re && new RegExp(re[1], re[2].replace(/[gy]/g, "") + "y");
+  const lit = pattern.replace(/\s+/g, " ").trim();
+  for (const w of cmds) {
+    if (["echo", "printf"].includes(w[0].text)) continue;
+    const text = w.map((x) => x.text).join(" ");
+    let at = 0;
+    for (const [k, x] of w.entries()) {
+      if (!x.redir && (k === 0 || (!x.quoted && !/\s/.test(x.text)))) {
+        for (let j = 0; j < x.text.length; j++) {
+          if (j > 0 && x.text[j - 1] !== "/") continue;
+          const rest = text.slice(at + j);
+          if (sticky ? (sticky.lastIndex = 0, sticky.test(rest)) : rest.startsWith(lit)) return true;
+        }
+      }
+      at += x.text.length + 1;
+    }
+  }
+  return false;
+}
+
 // Path globs relative to the project root: ** spans directories, * and ? stay within one.
 export function globToRegExp(glob) {
   let re = "";
