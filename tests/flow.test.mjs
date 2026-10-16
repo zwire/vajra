@@ -304,6 +304,61 @@ test("a tool hook that crashes refuses the call", () => {
   assert.match(r.stderr, /could not check this call/);
 });
 
+test("a runtime that cannot load blocks tool calls instead of letting them through", () => {
+  const p = project();
+  const scriptsDir = path.join(p.skill, "scripts");
+  fs.renameSync(path.join(scriptsDir, "guard.mjs"), path.join(p.proj, "guard.mjs.bak"));
+  let r = p.bash("ls");
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /runtime did not load: guard\.mjs/);
+  assert.match(p.hook("session-start", {}).stdout, /rails are broken/);
+  assert.equal(p.cli("status").status, 1);
+  // An outdated copy that lacks what flow.mjs needs counts as not loaded.
+  fs.writeFileSync(path.join(scriptsDir, "guard.mjs"), "export const guardMatches = () => false;\n");
+  r = p.bash("ls");
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /guard\.mjs lacks/);
+});
+
+test("an invalid graph keeps the rails' own protections", () => {
+  const p = project();
+  fs.writeFileSync(path.join(p.skill, "playbooks", "ship.md"), SHIP.replace("to: spike", "to: nowhere"));
+  for (const c of ["rm -rf .flow", "node .claude/skills/demo-flow/scripts/flow.mjs approve", "rm .claude/skills/demo-flow/SKILL.md"]) assert.equal(p.bash(c).status, 2, c);
+  assert.equal(p.write(".flow/demo-flow/state.json").status, 2);
+  assert.equal(p.write(".claude/skills/demo-flow/profile.md").status, 2);
+  assert.equal(p.bash("npm run deploy").status, 0);
+  assert.equal(p.write("src/a.js").status, 0);
+});
+
+test("tools the hook does not know are read by their input", () => {
+  const p = project();
+  const pre = (tool_name, tool_input) => p.hook("pre-tool-use", { tool_name, tool_input }).status;
+  // MCP and other tools that write, run commands or code, or delete.
+  assert.equal(pre("mcp__fs__write_file", { path: ".flow/demo-flow/state.json", content: "{}" }), 2);
+  assert.equal(pre("mcp__fs__write_file", { path: `${p.proj}/.claude/skills/demo-flow/playbooks/ship.md`, content: "x" }), 2);
+  assert.equal(pre("mcp__fs__write_file", { path: ".claude/settings.json", content: "{}" }), 2);
+  assert.equal(pre("mcp__fs__write_file", { path: "file://" + path.join(p.proj, ".flow", "demo-flow", "project.md"), content: "x" }), 2);
+  assert.equal(pre("mcp__shell__execute_command", { command: "rm -rf .flow" }), 2);
+  assert.equal(pre("mcp__shell__execute_command", { command: ["bash", "-c", "rm -rf .flow"] }), 2);
+  assert.equal(pre("mcp__shell__execute_command", { command: "npm run deploy" }), 2, "guarded outside its playbook");
+  assert.equal(pre("mcp__py__run_python", { code: "import shutil; shutil.rmtree('.flow')" }), 2);
+  assert.equal(pre("mcp__fs__delete_directory", { path: "." }), 2);
+  assert.equal(pre("mcp__fs__write_file", { path: "./a b/../.flow/demo-flow/state.json", content: "x" }), 2);
+  assert.equal(pre("Bash", { script: "rm -rf .flow" }), 2, "a shell tool with its command under an unknown key");
+  assert.equal(pre("Edit", { old_string: "a", new_string: "b" }), 2, "an edit that names no file");
+  assert.equal(pre("MultiEdit", { file_path: "src/a.js", edits: [{ file_path: ".flow/demo-flow/state.json", old_string: "a", new_string: "b" }] }), 2);
+  assert.equal(pre("replace", { file_path: ".flow/demo-flow/state.json", old_string: "a", new_string: "b" }), 2);
+  // Reading, planning and ordinary work are not blocked.
+  assert.equal(pre("mcp__fs__read_file", { path: ".flow/demo-flow/state.json" }), 0);
+  assert.equal(pre("mcp__fs__get_or_create_file", { path: ".flow/demo-flow/state.json" }), 2, "a read-sounding name that also acts");
+  assert.equal(pre("Grep", { pattern: "approve", path: ".flow" }), 0);
+  assert.equal(pre("mcp__git__git_status", { repo_path: "." }), 0);
+  assert.equal(pre("mcp__fs__write_file", { path: "src/a.js", content: "see .flow/ for state" }), 0);
+  assert.equal(pre("mcp__shell__execute_command", { command: "ls -la" }), 0);
+  assert.equal(pre("TodoWrite", { todos: [{ content: "check .flow/demo-flow/log.jsonl", status: "pending" }] }), 0);
+  assert.equal(pre("Task", { prompt: "Read .flow/demo-flow/state.json and summarize it" }), 0);
+});
+
 test("only the human approves, and the agent cannot switch its own rails off", () => {
   const p = project();
   toGate(p);

@@ -267,7 +267,31 @@ const SHELL_TOOLS = new Set(["bash", "powershell", "shell", "run_shell_command",
 const EDIT_TOOLS = new Set([
   "edit", "write", "create", "multiedit", "notebookedit", "write_file", "edit_file", "create_file",
   "str_replace_based_edit_tool", "replace_string_in_file", "multi_replace_string_in_file", "insert_edit_into_file", "edit_notebook_file",
+  "replace", "delete", "delete_file",
 ]);
+// Any other tool is read by its input: a tool whose name (its last part, for MCP tools named
+// server__tool) says it only reads is let through; for the rest, values under these keys are read
+// as shell lines or as code, and every value is checked as a path against the rails.
+const READ_ONLY_TOOL = /^(read|get|list|search|grep|glob|find|view|ls|stat|fetch|query|describe|show|lookup|inspect|web)/;
+const ACTING_WORD = /write|creat|updat|set|put|post|delet|remov|move|renam|edit|exec|run|apply|patch|save|insert|append|replac|upload|kill|push|commit|mkdir|copy|install/;
+const COMMAND_KEY = /^(command|cmd|commandline|command_line|args|argv)$/i;
+const CODE_KEY = /^(code|script|source|program)$/i;
+const MAX_INPUT_DEPTH = 32;
+
+// An argv array quoted back into one line, so `["bash", "-lc", "x y"]` keeps its script whole.
+const quoteArgv = (c) => c.map((a) => String(a)).map((a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`)).join(" ");
+
+// Every string in a tool's input with the key it sits under; a list of strings under a command
+// key is one argv. Past MAX_INPUT_DEPTH the rest is kept as one JSON string, so nothing is dropped.
+function inputStrings(v, key = "", depth = 0, out = []) {
+  if (depth > MAX_INPUT_DEPTH) out.push({ key, text: JSON.stringify(v) ?? "" });
+  else if (typeof v === "string") out.push({ key, text: v });
+  else if (Array.isArray(v)) {
+    if (COMMAND_KEY.test(key) && v.length && v.every((x) => typeof x === "string")) out.push({ key, text: quoteArgv(v) });
+    else for (const x of v) inputStrings(x, key, depth + 1, out);
+  } else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) inputStrings(x, k, depth + 1, out);
+  return out;
+}
 
 function toolInput(input) {
   const ti = input.tool_input ?? input.toolInput ?? input.toolArgs ?? input.input ?? {};
@@ -314,26 +338,49 @@ function editChange(ti) {
   return { removed, added, whole };
 }
 
+// Also read a line as PowerShell where it may run as such: a PowerShell tool, a non-Bash shell
+// tool on Windows, or a line that looks like PowerShell.
+const shellLine = (name, command) => ({ command, ps: /^(powershell|pwsh)$/.test(name) || (process.platform === "win32" && name !== "bash") || PS_LIKE.test(command) });
+
+// What a tool call does, as the hooks check it:
+//   { kind: "shell", lines: [{ command, ps }] }
+//   { kind: "edit", paths, change }       paths empty when the edit names no file the hook can find
+//   { kind: "other", readOnly, lines, code, values }   any other tool, read by its input
 export function toolAction(input) {
   const name = String(input.tool_name || input.toolName || "").toLowerCase();
   const ti = toolInput(input);
   if (SHELL_TOOLS.has(name) || (!name && (ti.command || input.command))) {
     const c = ti.command ?? ti.cmd ?? ti.CommandLine ?? ti.command_line ?? input.command ?? "";
-    // An argv array is quoted back into one line, so `["bash", "-lc", "x y"]` keeps its script whole.
-    const quote = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`);
-    const command = Array.isArray(c) ? c.map((a) => quote(String(a))).join(" ") : String(c);
-    // Also read the line as PowerShell where it may run as such: a PowerShell tool, a non-Bash
-    // shell tool on Windows, or a line that looks like PowerShell.
-    const ps = /^(powershell|pwsh)$/.test(name) || (process.platform === "win32" && name !== "bash") || PS_LIKE.test(command);
-    return { kind: "shell", command, ps };
+    let command = Array.isArray(c) ? quoteArgv(c) : String(c);
+    // A shell call whose command sits under a field the hook does not know: read every value.
+    if (!command.trim()) command = inputStrings(ti).map((x) => x.text).join("\n");
+    return { kind: "shell", lines: [shellLine(name, command)] };
   }
   if (name === "apply_patch" || name === "applypatch") return { kind: "edit", paths: patchPaths(ti), change: editChange(ti) };
   if (EDIT_TOOLS.has(name)) {
-    const paths = [ti.file_path || ti.filePath || ti.path || ti.notebook_path || ti.target_file || ti.absolute_path, ...patchPaths(ti)];
-    if (Array.isArray(ti.replacements)) paths.push(...ti.replacements.map((r) => r?.filePath || r?.file_path));
+    const one = (e) => e?.file_path || e?.filePath || e?.path || e?.notebook_path || e?.target_file || e?.absolute_path;
+    const paths = [one(ti), ...patchPaths(ti)];
+    for (const list of [ti.replacements, ti.edits]) if (Array.isArray(list)) paths.push(...list.map(one));
     return { kind: "edit", paths: paths.filter(Boolean).map(String), change: editChange(ti) };
   }
-  return { kind: "other" };
+  const values = inputStrings(ti);
+  return {
+    kind: "other",
+    name,
+    readOnly: ((t) => READ_ONLY_TOOL.test(t) && !ACTING_WORD.test(t))(name.split(/__|[.:/]/).pop()),
+    lines: values.filter((x) => COMMAND_KEY.test(x.key)).map((x) => shellLine(name, x.text)),
+    code: values.filter((x) => CODE_KEY.test(x.key)).map((x) => x.text),
+    // Every value is checked as a path; prose resolves to no real path, so it does no harm.
+    values: values.map((x) => x.text).filter((t) => t && t.length < 4096).map((t) => t.replace(/^file:\/\//i, "")),
+  };
+}
+
+// Whether code for an interpreter names the run state or the rails: any mention counts, as it
+// can open any path. ctx = { root, skillDir }.
+export function codeTouchesRails(text, ctx) {
+  const t = norm(text);
+  const rel = norm(path.relative(ctx.root, ctx.skillDir));
+  return /\.flow/.test(t) || /flow\.mjs/.test(t) || (rel !== "" && t.includes(rel)) || HOOK_CONFIGS.some((f) => t.includes(f)) || DISABLES_HOOKS.test(text);
 }
 
 // ---------- shell access to the run state and to the human-only commands ----------

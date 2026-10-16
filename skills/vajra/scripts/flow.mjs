@@ -41,8 +41,25 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { validateSkill, commandMatches, globToRegExp, readProject, projectFile, resolveText, resolveList, VERSION } from "./validate.mjs";
-import { guardMatches, normalizePayload, toolAction, shellViolation, readOnly, dropsHooks, railsPaths, inside, samePath } from "./guard.mjs";
+
+// The rest of the runtime is loaded here rather than imported, so a missing or outdated file is
+// caught: a hook that failed to start would exit 1, which agents treat as "allow" (see main).
+const REQUIRED = {
+  "validate.mjs": ["validateSkill", "commandMatches", "globToRegExp", "readProject", "projectFile", "resolveText", "resolveList", "VERSION"],
+  "guard.mjs": ["guardMatches", "normalizePayload", "toolAction", "shellViolation", "readOnly", "dropsHooks", "railsPaths", "inside", "samePath", "codeTouchesRails"],
+};
+let loadError = null;
+const lib = {};
+for (const [file, names] of Object.entries(REQUIRED)) {
+  try {
+    const m = await import(`./${file}`);
+    const missing = names.filter((n) => m[n] === undefined);
+    if (missing.length) throw new Error(`${file} lacks ${missing.join(", ")}; copy the runtime from vajra again`);
+    Object.assign(lib, m);
+  } catch (e) { loadError ||= `${file}: ${e.message}`; }
+}
+const { validateSkill, commandMatches, globToRegExp, readProject, projectFile, resolveText, resolveList, VERSION } = lib;
+const { guardMatches, normalizePayload, toolAction, shellViolation, readOnly, dropsHooks, railsPaths, inside, samePath, codeTouchesRails } = lib;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(process.env.FLOW_SKILL || path.join(here, ".."));
@@ -525,22 +542,64 @@ function readStdin() {
 
 const RAILS_MSG = "the workflow's own rules (its playbooks, profile and scripts) and the hooks that enforce them change only while the user has suspended the rails. Stop and ask the user to run `flow suspend` first.";
 
+const STATE_MSG = "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
+const SHELL_MSG = {
+  human: "only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.",
+  rails: RAILS_MSG,
+  complex: "this command nests shells or scripts too deeply for the rails to check. Run it as simpler, separate commands.",
+  clean: "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.",
+  state: STATE_MSG,
+};
+const DELETING_TOOL = /delete|remove|rm|move|rename|clean|purge|unlink|trash/;
+
+// Checks that protect the rails themselves: the run state, the project bindings, the skill, the
+// hook settings and the human-only commands. They need no graph, so they hold even while the
+// graph is invalid.
+function railsCheck(act, g, root, cwd) {
+  const rp = railsPaths(root, skillDir);
+  const ctx = { root, cwd, skillDir };
+  const pathCheck = (abs, change) => {
+    const rel = relPath(root, abs);
+    if (samePath(rel, g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the user has suspended the rails. Stop and ask the user to run \`flow suspend\` first, or to edit the file themselves.`;
+    if (/^\.flow(\/|$)/i.test(rel)) return "the run state is written only by flow.mjs.";
+    if (inside(abs, rp.skill)) return RAILS_MSG;
+    if (rp.configs.some((q) => samePath(q, abs)) && (!change || dropsHooks(abs, { change }))) return RAILS_MSG;
+    return null;
+  };
+  if (act.kind === "edit") {
+    if (!act.paths.length) return "this edit names no file the rails can find, so it cannot be checked. Use the agent's own edit or write tool with a file path.";
+    for (const fp of act.paths) { const r = pathCheck(path.resolve(cwd, fp), act.change); if (r) return r; }
+    return null;
+  }
+  for (const line of act.lines || []) {
+    const v = shellViolation(line.command, line.ps, ctx);
+    if (v) return SHELL_MSG[v];
+  }
+  if (act.kind !== "other" || act.readOnly) return null;
+  if (act.code.some((c) => codeTouchesRails(c, ctx))) return `${STATE_MSG} The same holds for the workflow's own files and hook settings.`;
+  const deletes = DELETING_TOOL.test(act.name);
+  for (const t of act.values) {
+    const abs = path.resolve(cwd, t.replace(/^~(?=\/|\\|$)/, os.homedir()));
+    // An unknown tool may write any path it is given, and one that deletes takes what is below it.
+    const r = pathCheck(abs, null) || (deletes && [rp.state, rp.skill, ...rp.configs].some((q) => inside(q, abs)) ? RAILS_MSG : null);
+    if (r) return r;
+  }
+  return null;
+}
+
 function preToolUse(g, state, input, root) {
   const rails = railsLevel(g);
-  if (!g.ok || state.suspended || rails === "advisory") return null;
+  if (state.suspended || (g.ok && rails === "advisory")) return null;
   const act = toolAction(input);
+  const cwd = input.cwd || root;
+  const own = railsCheck(act, g, root, cwd);
+  if (own || !g.ok) return own;
   const run = state.run;
   const f = flowCmd(root);
 
   if (act.kind === "edit") {
-    const rp = railsPaths(root, skillDir);
     for (const fp of act.paths) {
-      const abs = path.resolve(input.cwd || root, fp);
-      const rel = relPath(root, abs);
-      if (samePath(rel, g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the user has suspended the rails. Stop and ask the user to run \`flow suspend\` first, or to edit the file themselves.`;
-      if (/^\.flow(\/|$)/i.test(rel)) return "the run state is written only by flow.mjs.";
-      if (inside(abs, rp.skill)) return RAILS_MSG;
-      if (rp.configs.some((q) => samePath(q, abs)) && dropsHooks(abs, act)) return RAILS_MSG;
+      const rel = relPath(root, path.resolve(cwd, fp));
       if (rel.startsWith("..")) continue;
       if (!run) { if (rails === "strict") return `no playbook is active, so edits are blocked. Match the task to a playbook and run \`${f} start <playbook> --request "..."\`.`; continue; }
       if (run.paused && rails === "strict") return `the run is paused; \`${f} resume\` before editing.`;
@@ -553,20 +612,13 @@ function preToolUse(g, state, input, root) {
     return null;
   }
 
-  if (act.kind === "shell") {
-    const cmd = act.command;
-    const v = shellViolation(cmd, act.ps, { root, cwd: input.cwd || root, skillDir });
-    if (v === "human") return "only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.";
-    if (v === "rails") return RAILS_MSG;
-    if (v === "complex") return "this command nests shells or scripts too deeply for the rails to check. Run it as simpler, separate commands.";
-    if (v === "clean") return "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.";
-    if (v === "state") return "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
-    if (g.unboundGuards.length && !readOnly(cmd, act.ps)) {
+  for (const { command: cmd, ps } of act.lines || []) {
+    if (g.unboundGuards.length && !readOnly(cmd, ps)) {
       return `guarded commands use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")}, which ${g.projectFile} does not bind, so they cannot be told apart from other commands. Only reading commands run until the user fills in those values.`;
     }
     for (const node of g.nodes.values()) {
       for (const pat of node.guards) {
-        if (!guardMatches(pat, cmd, { ps: act.ps })) continue;
+        if (!guardMatches(pat, cmd, { ps })) continue;
         if (!run || run.playbook !== node.id) return `\`${pat}\` is irreversible and runs only inside playbook ${node.id}, after its human gate. Current playbook: ${run ? run.playbook : "none"}.`;
         if (run.paused) return "the run is paused.";
         const step = guardedStep(node, run, pat);
@@ -824,12 +876,18 @@ export function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === "hook") {
     const format = parseArgs(rest.slice(1)).o.format;
-    try { return runHook(rest[0], format); } catch (e) {
+    try {
+      if (loadError) throw new Error(`the runtime did not load: ${loadError}`);
+      return runHook(rest[0], format);
+    } catch (e) {
       // A crashed tool hook exits 1, which agents treat as "allow"; refuse the call instead.
-      if (rest[0] !== "pre-tool-use") throw e;
-      return blockTool(`the rails could not check this call (${e.message}). Stop and ask the user.`, format);
+      if (rest[0] === "pre-tool-use") return blockTool(`the rails could not check this call (${e.message}). Stop and ask the user.`, format);
+      if (rest[0] === "session-start" || rest[0] === "user-prompt") console.log(context({ hook_event_name: rest[0] === "user-prompt" ? "UserPromptSubmit" : "SessionStart" }, `${tag} The rails are broken (${e.message}); every tool call is blocked until the user repairs the skill's scripts/.`, format));
+      else if (format === "antigravity") console.log("{}");
+      return 0;
     }
   }
+  if (loadError) { console.error(`${tag} the runtime did not load: ${loadError}`); return 1; }
   if (cmd === "mcp") { serveMcp(); return undefined; }
   if (!cmd || cmd === "help" || cmd === "--help") {
     const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
