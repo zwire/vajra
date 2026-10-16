@@ -1,0 +1,40 @@
+{
+  "title": "Your workflow: round 1",
+  "intro": "Inferred from the repository and your declaration. Only uncertain, graph-changing questions are here.",
+  "questions": [
+    {
+      "id": "failure_cost",
+      "prompt": "What does a mistake in production cost?",
+      "why": "decides gate strictness and review depth",
+      "kind": "single",
+      "options": [
+        { "id": "a", "label": "Nothing, it's a prototype", "value": "throwaway" },
+        { "id": "b", "label": "Some annoyed teammates", "value": "internal" },
+        { "id": "c", "label": "Customer impact", "value": "customer" },
+        { "id": "d", "label": "Regulatory or safety impact", "value": "regulated" }
+      ],
+      "recommended": "c",
+      "reason": "you mentioned paying customers",
+      "evidence": "deploy config and on-call runbook in the repository"
+    },
+    {
+      "id": "facets",
+      "prompt": "Which of these apply to your work?",
+      "why": "each adds evidence, gates or rails",
+      "kind": "multi",
+      "options": [
+        { "id": "a", "label": "Results are judged by a metric", "value": "measured-outcome" },
+        { "id": "b", "label": "Changes alter stored data", "value": "data-mutation" },
+        { "id": "c", "label": "Others depend on our API or schema", "value": "shared-contracts" }
+      ],
+      "recommended": ["a", "b"]
+    },
+    {
+      "id": "evidence",
+      "prompt": "What convinces you a change is done?",
+      "why": "seeds every playbook's Done when",
+      "kind": "text",
+      "recommended": "Offline eval on the frozen set beats the baseline, then a shadow run shows no latency regression."
+    }
+  ]
+}
