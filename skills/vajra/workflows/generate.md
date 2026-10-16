@@ -38,7 +38,7 @@ This is a draft. Do not ask questions yet.
 
 ## 4. Consult (grill)
 
-Run [consult.md](consult.md) on the draft: one question at a time, each with a recommendation, dependencies first, challenging both unnecessary process and missing safeguards. Push the domain model until every field is concrete enough to write a step with a real command or artifact in it. It ends with a proposed playbook list the user has accepted (or told you to go ahead with).
+Run [consult.md](consult.md) on the draft: short rounds of choices pre-set to your recommendations, on the lightest [answer surface](consult.md#answer-surfaces) the agent has, dependencies first, challenging both unnecessary process and missing safeguards. Push the domain model until every field is concrete enough to write a step with a real command or artifact in it. It ends with a proposed playbook list the user has accepted (or told you to go ahead with).
 
 Write the final profile using [../templates/profile.md](../templates/profile.md): axis values (including `facets` and `rails`) in the frontmatter; sources, the domain model and the consult log in the body. Fill `generator` from `node scripts/validate.mjs --version`.
 

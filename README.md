@@ -27,7 +27,7 @@ flowchart LR
   you(["“Offline experiments, then shadow traffic,<br/>then an A/B ramp. Revenue is on the line.”"])
   subgraph gen ["/vajra · once"]
     direction TB
-    g1["Infer your profile<br/>and domain model"] --> g2["Grill you<br/>one question at a time"] --> g3["Compose the graph<br/>and its rails"] --> g4{{"Validate<br/>and dry-run"}}
+    g1["Infer your profile<br/>and domain model"] --> g2["Grill you<br/>in quick rounds of choices"] --> g3["Compose the graph<br/>and its rails"] --> g4{{"Validate<br/>and dry-run"}}
   end
   subgraph flow ["/your-flow · every task"]
     direction TB
@@ -63,7 +63,7 @@ npx skills add zwire/vajra        # add -g to install globally
 Exploratory prototyping that can graduate to production. Solo, a Rails app on Heroku.
 ```
 
-It reads your repository, asks you one question at a time (each with a recommendation; reply "go" to accept the rest), then writes, validates and dry-runs a skill such as `.agents/skills/your-flow/`. Other declarations it handles:
+It reads your repository, asks you a few short rounds of multiple-choice questions, each pre-set to its recommendation (through your agent's question buttons, a one-page form, or plain text; reply "ok" or press Send to accept), then writes, validates and dry-runs a skill such as `.agents/skills/your-flow/`. Other declarations it handles:
 
 - "Two-week sprints, PO-driven backlog, nothing ships without QA sign-off."
 - "Robot perception stack with a camera. We have a simulator and one real arm."
@@ -127,7 +127,7 @@ vajra fixes both. It builds the graph **around you**, and **enforces** it.
 - **🛤️ Rails, not reminders.** Every generated skill carries `flow.mjs`, a zero-dependency runtime. It tracks which playbook owns the request and refuses exits the graph does not have. It runs each playbook's checks before any exit opens, and red checks route the run down the failure exit. Installed as lifecycle hooks, it blocks guarded irreversible commands until a human approves, limits edits to the active playbook's paths, and keeps the agent from touching its own run state.
 - **🧩 No lock-in.** The generated skill is plain Agent Skills with spec-only frontmatter and no links outside itself. The runtime is a CLI any agent can run, and the hooks use the protocol current agents share (JSON on stdin, exit code 2 blocks). One command installs them for Claude Code, Codex, Cursor, GitHub Copilot (CLI, cloud agent and VS Code), Antigravity (CLI, IDE and app), Qwen Code, Factory Droid or Windsurf.
 - **🎯 Fits your domain, not a preset.** There are no "web" or "robotics" packs. vajra builds a domain model for you, split into areas as finely as the graph needs. It uses ten cross-cutting facets (measured outcome, stand-in ladder, physical world, data mutation…) as a checklist. The validator flags any playbook whose steps or "Done when" name nothing real.
-- **🔥 It grills you before it builds.** It asks one question at a time, always with a recommendation. It pushes back on process you would never run and on safeguards you forgot.
+- **🔥 It grills you before it builds, lightly.** It asks short rounds of choices, each pre-set to a recommendation, through your agent's own question tool, a one-page form, or plain text. It pushes back on process you would never run and on safeguards you forgot.
 - **🧪 → 🏭 Exploration that can graduate.** Work is labeled `throwaway`, `tracer` or `hardened`. A label rises only through a gate that declares the raise, and spike code is rebuilt instead of promoted. Throwaway playbooks can write only to their scratch paths.
 - **✅ Machine-checked.** The validator checks the graph, the gates, the rails and the domain fit, and whether the graph matches your profile.
 - **🔁 Evolves with you.** Retros and phase shifts go through Evolve mode, which applies the smallest change to the graph. Every run is logged in `.flow/`, so you can see where the workflow actually hurts.
@@ -292,7 +292,7 @@ flowchart TB
     P["Style profile<br/>15 axes"] ~~~ DM["Domain model<br/>areas × facets"]
   end
   inputs --> model
-  model <-- "one question at a time,<br/>each with a recommendation" --> G["Grill"]
+  model <-- "short rounds of choices,<br/>pre-set to a recommendation" --> G["Grill"]
   G --> C
   subgraph build ["Build"]
     direction LR
@@ -415,9 +415,10 @@ skills/vajra/       the installable meta skill
 ├── references/               profile axes, composition, domain model, rails, gates and lifecycles,
 │   ├── facets/               graph model, authoring, calibration; cross-cutting domain facets
 │   └── blueprints/           playbook blueprints (one file each)
-├── templates/                skeletons for generated files
+├── templates/                skeletons for generated files, and the consult round spec
 └── scripts/
     ├── validate.mjs          validator and graph renderer
+    ├── interview.mjs         consult rounds as chat text, a one-page form, or a local form
     └── flow.mjs              runtime (CLI, hooks, optional MCP), copied into every generated skill
 examples/                     generated skills (calibration and test fixtures)
 evals/                        structural eval cases and runner
