@@ -126,7 +126,7 @@ The generated skill runs on `scripts/flow.mjs` (copied from this skill). The run
 
 - `checks`: the commands that prove "Done when" mechanically, from the toolchain and domain model (test suite, reconciliation query, benchmark with threshold, reference diff). Every kept-code work playbook gets them when `verification` is not `evidence`. Exits that handle failure get `on: fail`, the others `on: pass`, so a red check routes the run instead of being argued away.
 - `writes`: the paths the playbook may edit. Throwaway playbooks get their scratch path only; playbooks that must not touch datasets, raw inputs or generated contracts leave those out.
-- `irreversible`: the exact commands of its `[irreversible]` steps (substring, or `/regex/`). The hooks block them everywhere else, and here until the human gate is approved. An irreversible step without a guarded command is a gap the validator reports.
+- `irreversible`: the exact commands of its `[irreversible]` steps (a prefix of the command, or `/regex/`, matched where a command starts, not inside quoted text). The hooks block them everywhere else, and here until the human gate is approved. An irreversible step without a guarded command is a gap the validator reports.
 
 The router's "How to run" section drives every run through `flow.mjs` (see [../templates/router.md](../templates/router.md)).
 
