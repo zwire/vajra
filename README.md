@@ -12,9 +12,9 @@ A meta skill for AI coding agents. Describe how you work and what you build. It 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)](package.json)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](package.json)
-[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Cursor-8A2BE2.svg)](https://github.com/vercel-labs/skills)
+[![Agent Skills](https://img.shields.io/badge/Agent%20Skills-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Copilot-8A2BE2.svg)](https://github.com/vercel-labs/skills)
 [![Rails: CLI + hooks](https://img.shields.io/badge/rails-CLI%20%2B%20hooks-D97757.svg)](skills/vajra/references/rails.md)
-[![Hooks](https://img.shields.io/badge/hooks-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Cursor%20%C2%B7%20Copilot%20%C2%B7%20Antigravity%20%C2%B7%20Qwen%20Code%20%C2%B7%20Droid%20%C2%B7%20Windsurf-555.svg)](skills/vajra/references/rails.md#installing)
+[![Hooks](https://img.shields.io/badge/hooks-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20Copilot-555.svg)](skills/vajra/references/rails.md#installing)
 
 [Quick start](#quick-start) · [Usage](#usage) · [Why](#why) · [Rails](#rails-not-reminders) · [How it works](#how-it-works) · [Examples](#examples) · [Validator](#the-validator)
 
@@ -48,7 +48,7 @@ flowchart LR
 
 ## Quick start
 
-Requires Node.js 18+ and any coding agent that loads Agent Skills (Claude Code, Codex, Cursor, GitHub Copilot, Antigravity, and others).
+Requires Node.js 18+ and Claude Code, Codex or GitHub Copilot. The generated skill is plain Agent Skills, so other agents can load it, but the hooks are installed and tested for these three.
 
 **1. Install the skill**
 
@@ -72,7 +72,7 @@ It reads your repository, asks you a few short rounds of multiple-choice questio
 **3. Turn on the rails.** At the end it offers to install the hooks for the agents your project uses. You can also do it yourself:
 
 ```bash
-node <your-flow>/scripts/flow.mjs install --harness claude,codex,cursor,copilot,antigravity,qwen,factory,windsurf   # any subset
+node <your-flow>/scripts/flow.mjs install --harness claude,codex,copilot   # any subset
 ```
 
 **4. Work.** Invoke your new skill by name with a task, for example `/your-flow add CSV export to invoices`. The agent picks the playbook and drives the run.
@@ -128,7 +128,7 @@ vajra fixes both. It builds the graph **around you**, and **enforces** it.
 
 - **🛤️ Rails, not reminders.** Every generated skill carries `flow.mjs`, a zero-dependency runtime. It tracks which playbook owns the request and refuses exits the graph does not have. It runs each playbook's checks before any exit opens, and red checks route the run down the failure exit. Installed as lifecycle hooks, it blocks guarded irreversible commands until a human approves, limits edits to the active playbook's paths, and keeps the agent from touching its own run state.
 - **♻️ Reusable across repositories.** The skill holds your way of working and your domain, never one repository. Commands, paths, URLs and other values of one repository are bindings (`${test}`, `${code}/**`), declared in the skill's `bindings.md` and given per project in `.flow/<skill>/project.md`. The validator rejects literal rails values and warns on repository paths anywhere in the skill.
-- **🧩 No lock-in.** The generated skill is plain Agent Skills with spec-only frontmatter and no links outside itself. The runtime is a CLI any agent can run, and the hooks use the protocol current agents share (JSON on stdin, exit code 2 blocks). One command installs them for Claude Code, Codex, Cursor, GitHub Copilot (CLI, cloud agent and VS Code), Antigravity (CLI, IDE and app), Qwen Code, Factory Droid or Windsurf.
+- **🧩 No lock-in.** The generated skill is plain Agent Skills with spec-only frontmatter and no links outside itself. The runtime is a CLI any agent can run, and the hooks use the protocol current agents share (JSON on stdin, exit code 2 blocks). One command installs them for Claude Code, Codex and GitHub Copilot (CLI, cloud agent and VS Code).
 - **🎯 Fits your domain, not a preset.** There are no "web" or "robotics" packs. vajra builds a domain model for you, split into areas as finely as the graph needs. It uses ten cross-cutting facets (measured outcome, stand-in ladder, physical world, data mutation…) as a checklist. The validator flags any playbook whose steps or "Done when" name nothing real.
 - **🔥 It grills you before it builds, lightly.** It asks short rounds of choices, each pre-set to a recommendation, through your agent's own question tool, a one-page form, or plain text. It pushes back on process you would never run and on safeguards you forgot.
 - **🧪 → 🏭 Exploration that can graduate.** Work is labeled `throwaway`, `tracer` or `hardened`. A label rises only through a gate that declares the raise, and spike code is rebuilt instead of promoted. Throwaway playbooks can write only to their scratch paths.
@@ -242,7 +242,7 @@ $ (agent) abctl ramp search-ranker-0412 --percent 50
 Three levels (`advisory`, `standard`, `strict`) come from your profile. Install the hooks for the agents you use:
 
 ```bash
-node <your-flow>/scripts/flow.mjs install --harness claude,codex,cursor,copilot,antigravity,qwen,factory,windsurf   # any subset
+node <your-flow>/scripts/flow.mjs install --harness claude,codex,copilot   # any subset
 ```
 
 The [rails reference](skills/vajra/references/rails.md) spells out what is enforced, and also where enforcement ends: choices between legal exits remain the agent's judgment, and an agent without hooks is held only by the runtime it drives.

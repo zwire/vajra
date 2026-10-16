@@ -212,14 +212,14 @@ function readShell(s, depth, ps, ctx) {
   return out;
 }
 
-// Reads a command line as POSIX shell and, when `ps` is set, also as PowerShell, so a check sees
-// every way the line could run. `failed` is set when a reading failed (an unclosed quote, say);
+// Reads a command line in the shell it runs in: POSIX (ps false), PowerShell (ps true), or both
+// (ps "both") when the shell is not known, so a check sees every way the line could run. `failed` is set when a reading failed (an unclosed quote, say);
 // callers then also check the raw text, so they fail closed. `complex` is set when the line is past
 // the reader's limits; callers refuse it outright.
 export function shellCommands(command, { ps = false } = {}) {
   const cmds = [];
   let failed = false, complex = false;
-  for (const dialect of ps ? [false, true] : [false]) {
+  for (const dialect of ps === "both" ? [false, true] : [!!ps]) {
     try { cmds.push(...readShell(String(command), 0, dialect, { seen: new Set(), reads: 0, chars: 0 })); } catch (e) { failed = true; if (e instanceof TooComplex) complex = true; }
   }
   return { cmds, failed, complex };
@@ -258,16 +258,16 @@ export function guardMatches(pattern, command, { ps = false } = {}) {
 // ---------- tool calls ----------
 // Payloads differ slightly between agents; read the fields every current agent provides.
 
-// Copilot CLI: bash or powershell, create and edit ({ path }); its PascalCase hooks report these as
-// Bash, Read and Edit, and an apply_patch edit as Edit with the bare patch text as tool_input.
-// VS Code: run_in_terminal ({ command }),
-// create_file, replace_string_in_file, insert_edit_into_file, edit_notebook_file ({ filePath }),
-// multi_replace_string_in_file ({ replacements: [{ filePath }] }). Factory Droid: Execute, Create, Edit.
-const SHELL_TOOLS = new Set(["bash", "powershell", "shell", "run_shell_command", "exec_command", "local_shell", "terminal", "execute", "run_in_terminal"]);
+// Claude Code: Bash; Edit, Write, MultiEdit, NotebookEdit. Codex: shell, local_shell, exec_command;
+// apply_patch. Copilot CLI: bash or powershell, create and edit ({ path }); its PascalCase hooks
+// report these as Bash, Read and Edit, and an apply_patch edit as Edit with the bare patch text as
+// tool_input. VS Code: run_in_terminal ({ command }), create_file, replace_string_in_file,
+// insert_edit_into_file, edit_notebook_file ({ filePath }), multi_replace_string_in_file
+// ({ replacements: [{ filePath }] }).
+const SHELL_TOOLS = new Set(["bash", "powershell", "shell", "local_shell", "exec_command", "run_in_terminal"]);
 const EDIT_TOOLS = new Set([
-  "edit", "write", "create", "multiedit", "notebookedit", "write_file", "edit_file", "create_file",
-  "str_replace_based_edit_tool", "replace_string_in_file", "multi_replace_string_in_file", "insert_edit_into_file", "edit_notebook_file",
-  "replace", "delete", "delete_file",
+  "edit", "write", "create", "multiedit", "notebookedit",
+  "create_file", "replace_string_in_file", "multi_replace_string_in_file", "insert_edit_into_file", "edit_notebook_file",
 ]);
 // Any other tool is read by its input: a tool whose name (its last part, for MCP tools named
 // server__tool) says it only reads is let through; for the rest, values under these keys are read
@@ -304,28 +304,6 @@ const patchPaths = (ti) => {
   return [...text.matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm)].map((m) => m[1].trim());
 };
 
-// Windsurf Cascade sends { agent_action_name, tool_info } and Antigravity { workspacePaths, toolCall }
-// instead of the shared fields.
-export function normalizePayload(input) {
-  if (Array.isArray(input.workspacePaths)) {
-    const out = { ...input, cwd: input.cwd || input.workspacePaths[0] };
-    const { name, args = {} } = input.toolCall || {};
-    if (name === "run_command") Object.assign(out, { tool_name: "Bash", tool_input: { command: args.CommandLine } });
-    else if (/^(write_to_file|replace_file_content|multi_replace_file_content)$/.test(name || "")) Object.assign(out, { tool_name: "Write", tool_input: { file_path: args.TargetFile } });
-    else if (name) Object.assign(out, { tool_name: name, tool_input: args });
-    return out;
-  }
-  const ti = input.tool_info;
-  if (!input.agent_action_name || !ti) return input;
-  const out = { ...input, cwd: input.cwd || ti.cwd, hook_event_name: input.agent_action_name };
-  if (input.agent_action_name === "pre_run_command") Object.assign(out, { tool_name: "Bash", tool_input: { command: ti.command_line } });
-  if (input.agent_action_name === "pre_write_code") Object.assign(out, { tool_name: "Write", tool_input: { file_path: ti.file_path } });
-  if (input.agent_action_name === "pre_user_prompt") out.prompt = ti.user_prompt;
-  return out;
-}
-
-const PS_LIKE = /(^|[\s;|&({])(remove|set|add|clear|out|new|move|copy|rename|get|invoke|start|write|select|test|resolve|foreach|where|import|export|convertto|convertfrom)-[a-z]+|\.flow\\|\\\.flow|`/i;
-
 // What an edit takes out and puts in, for the hook settings check: old/new strings, a whole new
 // file, or the - and + lines of a patch.
 function editChange(ti) {
@@ -338,9 +316,12 @@ function editChange(ti) {
   return { removed, added, whole };
 }
 
-// Also read a line as PowerShell where it may run as such: a PowerShell tool, a non-Bash shell
-// tool on Windows, or a line that looks like PowerShell.
-const shellLine = (name, command) => ({ command, ps: /^(powershell|pwsh)$/.test(name) || (process.platform === "win32" && name !== "bash") || PS_LIKE.test(command) });
+// A line runs in PowerShell from a PowerShell tool and in a POSIX shell from Bash or anywhere but
+// Windows; a shell tool other than Bash on Windows may run either, so it is read both ways.
+// Only the shell the line runs in is read: reading a Bash line as PowerShell as well found
+// deletions in ordinary lines (`rm -rf build/* && echo \`date\``), which was the hooks' worst source
+// of false blocks.
+const shellLine = (name, command) => ({ command, ps: /^(powershell|pwsh)$/.test(name) ? true : process.platform === "win32" && name !== "bash" ? "both" : false });
 
 // What a tool call does, as the hooks check it:
 //   { kind: "shell", lines: [{ command, ps }] }
@@ -405,7 +386,22 @@ function globHitsState(seg, ps) {
   }
   try { return new RegExp(`^${re}$`).test(".flow"); } catch { return true; }
 }
-const isStateWord = (t, ps) => STATE_PATH.test(norm(t)) || norm(t).split(/[/=:,]/).some((seg) => globHitsState(seg, ps));
+// A word that names .flow, or a glob that could expand to it. A dotted glob (`.f*`) counts wherever
+// it sits; PowerShell's bare `*` only where it lists the project root itself, so
+// `Remove-Item build\* -Recurse` does not count. ctx = { root, cwd } resolves a prefix like `..\proj`.
+function isStateWord(t, ps, ctx) {
+  const n = norm(t);
+  if (STATE_PATH.test(n)) return true;
+  return n.replace(/^-[a-z]+:/, "").split(/[=,]/).some((part) => {
+    const segs = part.split("/");
+    return segs.some((seg, i) => {
+      if (!globHitsState(seg, ps)) return false;
+      if (seg.startsWith(".")) return true;
+      const prefix = segs.slice(0, i).join("/");
+      return prefix === "" || prefix === "." || (!!ctx && samePath(path.resolve(ctx.cwd, prefix), ctx.root));
+    });
+  });
+}
 // A plain path argument, as opposed to an option value, a script or a sentence.
 const purePath = (t) => !/^-/.test(t) && !/\s/.test(t) && STATE_PATH.test(norm(t));
 
@@ -434,33 +430,67 @@ function head(w) {
 const subcommand = (args) => args.find((x) => !/^-/.test(x.text))?.text;
 // A reader with no flag that could make it write or run code.
 const pureReader = (name) => READERS.has(name) && !READERS.get(name);
+// git subcommands that leave the working tree alone (`git rm --cached` only changes the index).
+const gitReads = (args) => GIT_READS.has(subcommand(args)) || (subcommand(args) === "rm" && args.some((x) => x.text === "--cached"));
+// Programs whose arguments are text, not files: only their redirections write.
+const DATA_PROGRAMS = new Set(["echo", "printf", "write-output", "write-host"]);
+// Option values that leave a path out (`--exclude=.flow`, `--exclude-dir .flow`): naming .flow
+// there keeps it untouched. Programs that delete or move do not get this.
+const EXCLUDE_EQ = /^--?[\w-]*(exclude|ignore)[\w-]*=/i;
+const EXCLUDE_FLAG = /^--(exclude|exclude-dir|ignore|ignore-pattern|ignore-path)$/i;
+const withoutExcluded = (args) => args.filter((x, j) => !EXCLUDE_EQ.test(x.text) && !EXCLUDE_FLAG.test(args[j - 1]?.text || ""));
+// PowerShell cmdlets that write text to a path: only the path counts (`-Path`, `-LiteralPath`,
+// `-FilePath`, `-Name`, or the first operand), never the text (`Add-Content .gitignore ".flow/x"`).
+// Empty when the path is not given, so it comes from the pipeline.
+const CONTENT_WRITERS = /^(set-content|sc|add-content|ac|out-file|new-item|ni)$/;
+const PATH_PARAM = /^-(path|literalpath|lp|pspath|filepath|name)(:|$)/i;
+const SWITCH = /^-(force|nonewline|passthru|append|whatif|confirm|noclobber|asbytestream|recurse)$/i;
+function contentTargets(args) {
+  const out = [];
+  for (const [j, x] of args.entries()) if (PATH_PARAM.test(x.text)) { const v = /:/.test(x.text) ? x : args[j + 1]; if (v) out.push(v); }
+  const first = args.find((x, j) => !/^-/.test(x.text) && !(/^-/.test(args[j - 1]?.text || "") && !SWITCH.test(args[j - 1].text)));
+  if (first && !out.includes(first)) out.push(first);
+  return out;
+}
+// Copying only writes its destination: the last operand, or the value of -t / -Destination.
+// undefined when the program does not copy, null when the destination cannot be told.
+function copyDestination(name, args) {
+  if (/^(copy-item|cpi|copy)$/.test(name)) {
+    const at = args.findIndex((x) => /^-d(e(s(t(i(n(a(t(i(o(n)?)?)?)?)?)?)?)?)?)?$/i.test(x.text));
+    return at >= 0 ? args[at + 1] ?? null : args.filter((x) => !/^-/.test(x.text)).pop() ?? null;
+  }
+  if (!/^(cp|rsync|scp)$/.test(name)) return undefined;
+  if (args.some((x) => /^(-t|--target-directory)/.test(x.text))) return null;
+  return args.filter((x) => !/^-/.test(x.text)).pop() ?? null;
+}
 
-function commandViolation(w) {
+function commandViolation(w, ctx) {
   const { name, args } = head(w);
   const flowAt = w.findIndex((x) => programName(x.text) === "flow.mjs");
   if (flowAt >= 0 && w.slice(flowAt + 1).some((x) => HUMAN_ONLY.has(x.text.toLowerCase()))) return "human";
   // Code that loads flow.mjs itself could call approve() or answer a gate.
   if (INTERPRETERS.test(name) && args.some((x) => /flow\.mjs/i.test(x.text) && programName(x.text) !== "flow.mjs")) return "human";
   if (name === "git" && subcommand(args) === "clean" && args.some((x) => /^-[a-z]*[xX]/.test(x.text)) && !args.some((x) => /^(-[a-z]*n|--dry-run)$/.test(x.text))) return "clean";
-  if (w.some((x) => x.redir && isStateWord(x.text, w.ps))) return "state";
+  if (w.some((x) => x.redir && isStateWord(x.text, w.ps, ctx))) return "state";
+  if (DATA_PROGRAMS.has(name)) return null;
   // Interpreter code can open any path, so any mention of .flow in its arguments counts.
   if (INTERPRETERS.test(name)) return args.some((x) => mentionsState(x.text)) ? "state" : null;
-  if (name === "cp" || /^(copy-item|cpi|copy)$/.test(name)) {
+  const dest = copyDestination(name, args);
+  if (dest !== undefined) {
     // Copying out of .flow/ only reads it; the destination must not be in it.
-    const dest = name === "cp"
-      ? (args.some((x) => /^(-t|--target-directory)/.test(x.text)) ? null : args.filter((x) => !/^-/.test(x.text)).pop())
-      : args[args.findIndex((x) => /^-d(e(s(t(i(n(a(t(i(o(n)?)?)?)?)?)?)?)?)?)?$/i.test(x.text)) + 1];
-    if (!dest || isStateWord(dest.text, w.ps)) return args.some((x) => isStateWord(x.text, w.ps)) ? "state" : null;
+    if (!dest || isStateWord(dest.text, w.ps, ctx)) return args.some((x) => isStateWord(x.text, w.ps, ctx)) ? "state" : null;
     return args.some((x) => x !== dest && mentionsState(x.text) && STATE_PATH.test(norm(x.text)) && !purePath(x.text.replace(/^-(path|literalpath|lp):/i, ""))) ? "state" : null;
   }
-  const reader = READERS.has(name) ? READERS.get(name) : name === "git" && GIT_READS.has(subcommand(args)) ? /^--output/ : undefined;
-  if (reader === undefined) {
-    const deletes = w.ps && /^(remove-item|rm|ri|del|erase|rd|rmdir|clear-content|clc|move-item|mi|mv|move|rename-item|rni|ren)$/.test(name);
-    return args.some((x) => isStateWord(x.text, w.ps && deletes)) ? "state" : null;
-  }
-  if (!args.some((x) => mentionsState(x.text))) return null;
+  const deletes = /^(remove-item|rm|ri|del|erase|rd|rmdir|unlink|shred|clear-content|clc|move-item|mi|mv|move|rename-item|rni|ren)$/.test(name);
+  const content = w.ps && CONTENT_WRITERS.test(name) ? contentTargets(args) : [];
+  if (content.length) return content.some((x) => isStateWord(x.text, w.ps, ctx)) ? "state" : null;
+  const targets = deletes ? args : withoutExcluded(args);
+  const reader = READERS.has(name) ? READERS.get(name) : name === "git" && gitReads(args) ? /^--output/ : undefined;
+  if (reader === undefined) return targets.some((x) => isStateWord(x.text, w.ps && deletes, ctx)) ? "state" : null;
+  if (!targets.some((x) => mentionsState(x.text))) return null;
   if (reader && args.some((x) => reader.test(x.text))) return "state";
   for (const [j, x] of args.entries()) {
+    if (!targets.includes(x)) continue;
     if (!mentionsState(x.text)) continue;
     const value = x.text.replace(/^-(path|literalpath|lp):/i, "");
     if (STATE_PATH.test(norm(value)) && (!purePath(value) || OUTPUT_FLAG.test(args[j - 1]?.text || ""))) return "state";
@@ -472,8 +502,7 @@ function commandViolation(w) {
 // The rails' own definition: the skill (playbooks, profile, these scripts) and the agents' hook
 // settings. They change only while the human has suspended the rails, so the agent cannot switch
 // its own rails off (rails: advisory, a deleted guard, a removed hook, disableAllHooks).
-const HOOK_CONFIGS = [".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml", ".cursor/hooks.json",
-  ".agents/hooks.json", ".qwen/settings.json", ".factory/hooks.json", ".factory/settings.json", ".devin/hooks.json", ".windsurf/hooks.json"];
+const HOOK_CONFIGS = [".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml"];
 export function railsPaths(root, skillDir) {
   const configs = [...HOOK_CONFIGS, `.github/hooks/${path.basename(skillDir)}.json`].map((f) => path.join(root, f));
   configs.push(path.join(os.homedir(), ".claude", "settings.json"), path.join(os.homedir(), ".codex", "config.toml"));
@@ -499,13 +528,17 @@ function railsViolation(w, ctx) {
     }
   }
   if (pureReader(name)) return null;
-  if (name === "git" && GIT_READS.has(subcommand(args))) return null;
+  if (name === "git" && gitReads(args)) return null;
   if (INTERPRETERS.test(name)) {
     // Interpreter code (not the script it runs) that names the rails could rewrite them.
     const rel = norm(path.relative(ctx.root, rp.skill));
     return args.some((x) => /\s|[(;]/.test(x.text) && (norm(x.text).includes(rel) || HOOK_CONFIGS.some((f) => norm(x.text).includes(f)) || DISABLES_HOOKS.test(x.text))) ? "rails" : null;
   }
-  for (const x of [...args, ...w.slice(0, k)]) {
+  const dest = copyDestination(name, args);
+  const content = w.ps && CONTENT_WRITERS.test(name) ? contentTargets(args) : [];
+  const redirs = args.filter((x) => x.redir);
+  const named = DATA_PROGRAMS.has(name) ? redirs : dest ? [dest, ...redirs] : content.length ? [...content, ...redirs] : DELETERS.test(name) ? args : withoutExcluded(args);
+  for (const x of [...named, ...w.slice(0, k)]) {
     if (programName(x.text) === "flow.mjs" || /\s/.test(x.text) || (!x.redir && /^-/.test(x.text) && !/^-[a-z]+:/i.test(x.text))) continue;
     const p = resolve(x.text);
     if (inside(p, rp.skill) || rp.configs.some((q) => samePath(q, p))) return "rails";
@@ -514,7 +547,9 @@ function railsViolation(w, ctx) {
 }
 
 // Commands that change whatever is piped into them (`find .flow | xargs rm`, `gci .flow | Remove-Item`).
-const PIPE_WRITERS = /^(xargs|parallel|remove-item|ri|rm|del|erase|rd|rmdir|move-item|mi|mv|move|rename-item|rni|set-content|sc|add-content|ac|clear-content|clc|out-file|copy-item|cpi|tee-object|tee|new-item|ni)$/;
+// A content cmdlet given its own path writes the piped text there; tee and Copy-Item only write
+// their own target, which the command's own check covers.
+const PIPE_WRITERS = /^(xargs|parallel|remove-item|ri|rm|del|erase|rd|rmdir|move-item|mi|mv|move|rename-item|rni|set-content|sc|add-content|ac|clear-content|clc|out-file|new-item|ni)$/;
 
 // What a shell line would do that the agent may not: "human" (a human-only command), "rails",
 // "clean" (git clean -x), "state" (change .flow/), "complex" (past what the reader follows), or
@@ -522,10 +557,11 @@ const PIPE_WRITERS = /^(xargs|parallel|remove-item|ri|rm|del|erase|rd|rmdir|move
 export function shellViolation(command, ps, ctx) {
   const { cmds, failed, complex } = shellCommands(command, { ps });
   if (complex) return "complex";
-  const found = new Set(cmds.flatMap((w) => [commandViolation(w), ctx && railsViolation(w, ctx)]).filter(Boolean));
+  const found = new Set(cmds.flatMap((w) => [commandViolation(w, ctx), ctx && railsViolation(w, ctx)]).filter(Boolean));
   const pipeWriter = (w) => {
-    const { k, name } = head(w);
+    const { k, name, args } = head(w);
     if (!PIPE_WRITERS.test(name)) return false;
+    if (CONTENT_WRITERS.test(name) && contentTargets(args).length) return false;
     if (!/^(xargs|parallel)$/.test(name)) return true;
     // xargs runs a program on what it reads: only readers (and echo) leave .flow/ alone.
     let j = k + 1;
@@ -533,7 +569,7 @@ export function shellViolation(command, ps, ctx) {
     const prog = j < w.length ? programName(w[j].text) : "echo";
     return !pureReader(prog) && !["echo", "printf"].includes(prog);
   };
-  const statePiped = cmds.some((w) => w.piped && pipeWriter(w)) && cmds.some((w) => w.some((x) => isStateWord(x.text, w.ps)));
+  const statePiped = cmds.some((w) => w.piped && pipeWriter(w)) && cmds.some((w) => w.some((x) => isStateWord(x.text, w.ps, ctx)));
   if (statePiped) found.add("state");
   if (failed) {
     // Unreadable as shell: fall back to the raw text, conservatively.
@@ -544,28 +580,15 @@ export function shellViolation(command, ps, ctx) {
   return ["human", "rails", "clean", "state"].find((v) => found.has(v)) || null;
 }
 
-// A line made only of reading commands (and flow.mjs agent commands), for when guards are unbound.
-export function readOnly(command, ps) {
-  const { cmds, failed } = shellCommands(command, { ps });
-  if (failed) return false;
-  return cmds.every((w) => {
-    const { name, args } = head(w);
-    if (w.some((x) => x.redir)) return false;
-    if (name === "node" && args[0] && programName(args[0].text) === "flow.mjs") return true;
-    if (name === "git") return GIT_READS.has(subcommand(args)) && !["add", "commit"].includes(subcommand(args));
-    if (["echo", "printf", "pwd", "true"].includes(name)) return true;
-    const flags = READERS.get(name);
-    return READERS.has(name) && !(flags && args.some((x) => flags.test(x.text)));
-  });
-}
-
 // Whether an edit of a hook settings file removes a flow.mjs hook or turns hooks off.
 export function dropsHooks(abs, act) {
   const { removed, added, whole } = act.change;
   if (DISABLES_HOOKS.test(added) || DISABLES_HOOKS.test(whole ?? "")) return true;
-  if (/flow\.mjs/.test(removed)) return true;
+  // A hook command taken out must come back in the same edit: re-indenting or editing next to it is fine.
+  const hookCommands = (t) => [...t.matchAll(/[^"'\n]*flow\.mjs[^"'\n]*/g)].map((m) => m[0].trim());
+  if (hookCommands(removed).some((c) => !added.includes(c))) return true;
   if (whole === undefined) return false;
   let before = "";
   try { before = fs.readFileSync(abs, "utf8"); } catch { return false; }
-  return [...before.matchAll(/[^"'\n]*flow\.mjs[^"'\n]*/g)].some((m) => !whole.includes(m[0]));
+  return hookCommands(before).some((c) => !whole.includes(c));
 }

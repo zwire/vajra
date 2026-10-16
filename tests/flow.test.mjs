@@ -359,6 +359,41 @@ test("tools the hook does not know are read by their input", () => {
   assert.equal(pre("Task", { prompt: "Read .flow/demo-flow/state.json and summarize it" }), 0);
 });
 
+test("everyday commands are never blocked", () => {
+  // False blocks were the hooks' main bug: each line here was blocked by an earlier version.
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const rel = path.relative(p.proj, p.skill);
+  const flow = `${rel}/scripts/flow.mjs`;
+  for (const c of [
+    `echo ".flow/*/state.json" >> .gitignore`, "printf '.flow/*/log.jsonl\\n.flow/*/runs/\\n' >> .gitignore",
+    "grep -rn TODO src --exclude-dir=.flow", "grep -rn TODO . --exclude-dir=node_modules --exclude-dir=.flow",
+    "npx eslint . --ext .ts --ignore-pattern .flow", "tar czf backup.tgz --exclude=.flow src", "rsync -av --exclude .flow ./ /tmp/copy/",
+    `cp ${rel}/playbooks/ship.md /tmp/ship.md`, `echo "reviewed ${rel}"`, "git rm --cached .flow/demo-flow/state.json",
+    "rm -rf build/* && echo `date`", 'git add -A && git commit -m "fix: handle `null` in parser"',
+    `node ${flow} step 1 --evidence "tests pass in \`scratch/\`"`, `node ${rel}/scripts/validate.mjs ${rel}`,
+    "cat <<'EOF'\nRun state lives in .flow/demo-flow/state.json; do not edit it.\nEOF",
+  ]) assert.equal(p.bash(c).status, 0, c);
+  const ps = (command) => p.hook("pre-tool-use", { tool_name: "PowerShell", tool_input: { command } }).status;
+  for (const c of [
+    "Remove-Item build\\* -Recurse", "Remove-Item .\\dist\\* -Recurse -Force", "Remove-Item *.log",
+    'Write-Output ".flow/*/state.json" | Add-Content .gitignore', 'Add-Content .gitignore ".flow/*/state.json"',
+    `Copy-Item ${rel}\\playbooks\\ship.md $env:TEMP\\ship.md`, 'git commit -m "fix ``null`` handling"',
+  ]) assert.equal(ps(c), 0, c);
+  // The same shapes still block where they do touch the state.
+  for (const c of ["Remove-Item * -Recurse", "Remove-Item .\\* -Recurse", `Remove-Item ${p.proj}\\* -Recurse`, "Get-ChildItem .flow | Set-Content -Value x", "Add-Content .flow\\s x"]) assert.equal(ps(c), 2, c);
+  for (const c of ["rm -rf --exclude .flow .flow", "echo x > .flow/s", "rsync -a evil/ .flow/", `cp evil.md ${rel}/playbooks/ship.md`]) assert.equal(p.bash(c).status, 2, c);
+  // Editing next to the hooks in a settings file is fine; taking one out is not.
+  const q = project();
+  const settings = path.join(q.proj, ".claude", "settings.json");
+  const hookCmd = `node "${path.join(q.skill, "scripts", "flow.mjs")}" hook pre-tool-use`;
+  fs.mkdirSync(path.dirname(settings), { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: "command", command: hookCmd }] }] } }, null, 2));
+  const edit = (old_string, new_string) => q.hook("pre-tool-use", { tool_name: "Edit", tool_input: { file_path: settings, old_string, new_string } }).status;
+  assert.equal(edit(`{ "command": "${hookCmd}" }`, `{ "command": "${hookCmd}", "timeout": 30 }`), 0);
+  assert.equal(edit(`{ "command": "${hookCmd}" }`, "{}"), 2);
+});
+
 test("only the human approves, and the agent cannot switch its own rails off", () => {
   const p = project();
   toGate(p);
@@ -518,84 +553,40 @@ test("install writes hooks for each agent, and MCP only on request, idempotently
   const p = project();
   fs.mkdirSync(path.join(p.proj, ".claude"), { recursive: true });
   fs.writeFileSync(path.join(p.proj, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["Bash(ls)"] } }));
-  assert.equal(p.cli("install", "--harness", "claude,codex,cursor").status, 0);
+  assert.equal(p.cli("install", "--harness", "claude,codex,copilot").status, 0);
   assert.equal(fs.existsSync(path.join(p.proj, ".mcp.json")), false, "MCP is opt-in");
-  p.cli("install", "--harness", "claude,codex,cursor", "--mcp");
-  p.cli("install", "--harness", "claude,codex,cursor", "--mcp");
+  p.cli("install", "--harness", "claude,codex,copilot", "--mcp");
+  p.cli("install", "--harness", "claude,codex,copilot", "--mcp");
   const json = (f) => JSON.parse(fs.readFileSync(path.join(p.proj, f), "utf8"));
   const claude = json(".claude/settings.json");
   assert.deepEqual(claude.permissions, { allow: ["Bash(ls)"] });
   for (const ev of ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"]) assert.equal(claude.hooks[ev].length, 1, ev);
   assert.equal(claude.hooks.PreToolUse[0].hooks[0].command, 'node "$CLAUDE_PROJECT_DIR/.claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use');
   assert.equal(json(".codex/hooks.json").hooks.PreToolUse.length, 1);
-  assert.equal(json(".cursor/hooks.json").hooks.preToolUse[0].command, 'node ".claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use');
-  assert.deepEqual(json(".mcp.json").mcpServers["demo-flow"], { command: "node", args: [".claude/skills/demo-flow/scripts/flow.mjs", "mcp"] });
-  assert.ok(json(".cursor/mcp.json").mcpServers["demo-flow"]);
-  const toml = fs.readFileSync(path.join(p.proj, ".codex", "config.toml"), "utf8");
-  assert.equal(toml.match(/\[mcp_servers\."demo-flow"\]/g).length, 1);
-  assert.equal(p.cli("install", "--harness", "vim").status, 2);
-});
-
-test("install covers Copilot, Antigravity, Qwen Code, Factory Droid and Windsurf in their own formats", () => {
-  const p = project();
-  const json = (f) => JSON.parse(fs.readFileSync(path.join(p.proj, f), "utf8"));
-  const all = "copilot,antigravity,qwen,factory,windsurf";
-  assert.equal(p.cli("install", "--harness", all, "--mcp").status, 0);
-  assert.equal(p.cli("install", "--harness", all).status, 0);
-  const cmd = (ev) => `node ".claude/skills/demo-flow/scripts/flow.mjs" hook ${ev}`;
-
+  assert.equal(json(".codex/hooks.json").hooks.PreToolUse[0].hooks[0].command, 'node ".claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use');
   const copilot = json(".github/hooks/demo-flow.json");
   assert.equal(copilot.version, 1);
   for (const ev of ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"]) assert.equal(copilot.hooks[ev].length, 1, ev);
-  assert.deepEqual(copilot.hooks.PreToolUse[0], { type: "command", command: `${cmd("pre-tool-use")} --format copilot`, cwd: "." });
-
-  // Antigravity runs hooks in .agents/, keyed by hook name; only tool events take a matcher.
-  const agy = json(".agents/hooks.json")["demo-flow"];
-  const agyCmd = (ev) => `node "../.claude/skills/demo-flow/scripts/flow.mjs" hook ${ev} --format antigravity`;
-  assert.deepEqual(Object.keys(agy).sort(), ["PreInvocation", "PreToolUse", "Stop"]);
-  assert.deepEqual(agy.PreToolUse, [{ matcher: ".*", hooks: [{ type: "command", command: agyCmd("pre-tool-use") }] }]);
-  assert.deepEqual(agy.Stop, [{ type: "command", command: agyCmd("stop") }]);
-  assert.equal(agy.PreInvocation[0].command, agyCmd("user-prompt"));
-
-  const qwen = json(".qwen/settings.json");
-  assert.equal(qwen.hooks.PreToolUse[0].hooks[0].command, 'node "$QWEN_PROJECT_DIR/.claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use');
-  assert.ok(qwen.mcpServers["demo-flow"]);
-
-  assert.equal(json(".factory/settings.json").hooks.Stop.length, 1);
-
-  const windsurf = json(".windsurf/hooks.json").hooks;
-  assert.deepEqual(Object.keys(windsurf).sort(), ["pre_run_command", "pre_user_prompt", "pre_write_code"]);
-  assert.deepEqual(windsurf.pre_run_command, [{ command: cmd("pre-tool-use"), show_output: false }]);
-  assert.equal(windsurf.pre_write_code[0].command, cmd("pre-tool-use"));
-
-  // Where a newer config file exists, hooks go there instead.
-  const q = project();
-  fs.mkdirSync(path.join(q.proj, ".factory"), { recursive: true });
-  fs.writeFileSync(path.join(q.proj, ".factory", "hooks.json"), "{}");
-  fs.mkdirSync(path.join(q.proj, ".devin"), { recursive: true });
-  fs.writeFileSync(path.join(q.proj, ".devin", "hooks.json"), "{}");
-  assert.equal(q.cli("install", "--harness", "factory,windsurf").status, 0);
-  const qjson = (f) => JSON.parse(fs.readFileSync(path.join(q.proj, f), "utf8"));
-  assert.equal(qjson(".factory/hooks.json").PreToolUse.length, 1, "Droid's hooks.json is keyed by event at the top level");
-  assert.equal(qjson(".devin/hooks.json").hooks.pre_run_command.length, 1);
-  assert.equal(fs.existsSync(path.join(q.proj, ".factory", "settings.json")), false);
-  assert.equal(fs.existsSync(path.join(q.proj, ".windsurf")), false);
+  assert.deepEqual(copilot.hooks.PreToolUse[0], { type: "command", command: 'node ".claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use --format copilot', cwd: "." });
+  assert.deepEqual(json(".mcp.json").mcpServers["demo-flow"], { command: "node", args: [".claude/skills/demo-flow/scripts/flow.mjs", "mcp"] });
+  const toml = fs.readFileSync(path.join(p.proj, ".codex", "config.toml"), "utf8");
+  assert.equal(toml.match(/\[mcp_servers\."demo-flow"\]/g).length, 1);
+  assert.equal(p.cli("install", "--harness", "vim").status, 2);
+  assert.equal(p.cli("install", "--harness", "cursor").status, 2, "only Claude Code, Codex and Copilot are supported");
 });
 
 test("tool names and payloads of different agents are normalized", () => {
   const p = project();
   p.cli("start", "spike", "--request", "try it");
   const pre = (tool_name, tool_input) => p.hook("pre-tool-use", { tool_name, tool_input }).status;
-  assert.equal(pre("Shell", { command: "npm run deploy" }), 2);
-  assert.equal(pre("run_shell_command", { command: "npm run deploy" }), 2);
-  assert.equal(pre("Bash", { command: ["bash", "-lc", "npm run deploy"] }), 2);
-  assert.equal(pre("write_file", { file_path: "src/app.js" }), 2);
+  // Claude Code and Codex.
+  assert.equal(pre("Bash", { command: "npm run deploy" }), 2);
+  assert.equal(pre("shell", { command: ["bash", "-lc", "npm run deploy"] }), 2);
+  assert.equal(pre("exec_command", { cmd: "npm run deploy" }), 2);
+  assert.equal(pre("Write", { file_path: "src/app.js" }), 2);
   assert.equal(pre("apply_patch", { input: "*** Begin Patch\n*** Update File: src/app.js\n@@\n*** End Patch" }), 2);
   assert.equal(pre("apply_patch", { input: "*** Begin Patch\n*** Add File: scratch/a.js\n*** End Patch" }), 0);
   assert.equal(pre("Read", { file_path: "src/app.js" }), 0);
-  // Factory Droid.
-  assert.equal(pre("Execute", { command: "npm run deploy" }), 2);
-  assert.equal(pre("ApplyPatch", { patch: "*** Begin Patch\n*** Update File: src/app.js\n*** End Patch" }), 2);
   // Copilot CLI, as recorded in github/copilot-sdk test/snapshots/builtin_tools; arguments may arrive as a JSON string.
   assert.equal(pre("bash", { command: "npm run deploy", description: "Deploy" }), 2);
   assert.equal(pre("powershell", { command: "npm run deploy", description: "Deploy" }), 2);
@@ -632,52 +623,6 @@ test("Copilot gets a structured deny and a top-level additionalContext", () => {
   assert.equal(out.permissionDecision, "deny");
   assert.match(out.permissionDecisionReason, /^\[demo-flow\] Blocked: `npm run deploy` is irreversible/);
   assert.equal(hook("pre-tool-use", { tool_name: "Bash", tool_input: { command: "ls" } }).stdout, "");
-});
-
-test("Antigravity payloads and decisions", () => {
-  // Shapes captured from agy 1.3.3: no cwd or event name, workspacePaths and toolCall instead,
-  // decisions only as JSON on stdout, PreInvocation before every model call.
-  const p = project();
-  const hook = (event, input) => spawnSync(process.execPath, [path.join(p.skill, "scripts", "flow.mjs"), "hook", event, "--format", "antigravity"], {
-    cwd: path.join(p.proj, ".claude"), encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "" },
-    input: JSON.stringify({ conversationId: "c", modelName: "m", workspacePaths: [p.proj], ...input }),
-  });
-  const tool = (name, args) => JSON.parse(hook("pre-tool-use", { stepIdx: 2, toolCall: { name, args } }).stdout);
-  p.cli("start", "spike", "--request", "try it");
-  const allow = { decision: "allow" };
-  assert.deepEqual(tool("run_command", { CommandLine: "ls", Cwd: p.proj }), allow, "an empty decision would deny");
-  assert.equal(tool("run_command", { CommandLine: "rm .flow/demo-flow/state.json", Cwd: p.proj }).decision, "deny");
-  assert.match(tool("write_to_file", { TargetFile: path.join(p.proj, "src/app.js"), CodeContent: "x" }).reason, /^\[demo-flow\] Blocked: playbook spike may only write/);
-  assert.equal(tool("replace_file_content", { TargetFile: path.join(p.proj, "src/app.js") }).decision, "deny");
-  assert.deepEqual(tool("write_to_file", { TargetFile: path.join(p.proj, "scratch/a.js"), CodeContent: "x" }), allow);
-  assert.deepEqual(tool("view_file", { AbsolutePath: path.join(p.proj, "src/app.js") }), allow);
-
-  const first = JSON.parse(hook("user-prompt", { invocationNum: 0, initialNumSteps: 1 }).stdout);
-  assert.match(first.injectSteps[0].ephemeralMessage, /Active playbook: spike/);
-  assert.deepEqual(JSON.parse(hook("user-prompt", { invocationNum: 1, initialNumSteps: 3 }).stdout), {});
-
-  const stop = JSON.parse(hook("stop", { executionNum: 0, fullyIdle: true, terminationReason: "NO_TOOL_CALL" }).stdout);
-  assert.equal(stop.decision, "continue");
-  assert.deepEqual(JSON.parse(hook("stop", { executionNum: 1, fullyIdle: true }).stdout), {}, "bounced once per state of progress");
-
-  // At a gate, the injected context sends the user to the terminal.
-  const q = project();
-  toGate(q);
-  const qhook = (input) => spawnSync(process.execPath, [path.join(q.skill, "scripts", "flow.mjs"), "hook", "user-prompt", "--format", "antigravity"], {
-    cwd: q.proj, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "" }, input: JSON.stringify({ workspacePaths: [q.proj], ...input }),
-  });
-  assert.match(JSON.parse(qhook({ invocationNum: 0 }).stdout).injectSteps[0].ephemeralMessage, /cannot see chat replies to a gate: ask the user to run `node .* approve`/);
-});
-
-test("Windsurf Cascade payloads are normalized", () => {
-  const p = project();
-  const cascade = (agent_action_name, tool_info) => p.hook(agent_action_name === "pre_user_prompt" ? "user-prompt" : "pre-tool-use", { agent_action_name, tool_info });
-  assert.equal(cascade("pre_run_command", { command_line: "npm run deploy", cwd: p.proj }).status, 2);
-  assert.equal(cascade("pre_run_command", { command_line: "ls", cwd: p.proj }).status, 0);
-  assert.equal(toGate(p).status, 3);
-  assert.equal(cascade("pre_write_code", { file_path: path.join(p.proj, ".flow", "demo-flow", "state.json"), edits: [] }).status, 2);
-  assert.equal(cascade("pre_user_prompt", { user_prompt: "approve" }).status, 0);
-  assert.match(p.cli("status").stdout, /approved/i);
 });
 
 // Minimal MCP client over the server's stdio.
@@ -807,17 +752,12 @@ test("install writes a project skeleton for the bindings and never overwrites it
   assert.equal(fs.readFileSync(file, "utf8"), PROJECT);
 });
 
-test("while a guarded command's binding is unset, only reading commands run", () => {
+test("while a guarded command's binding is unset, commands run and the agent is told the guard is off", () => {
   const p = project();
   fs.writeFileSync(path.join(p.proj, ".flow", "demo-flow", "project.md"), "---\nscratch: scratch\nok-check: test -f ok.txt\ndeploy: \"\"\nrollout: rollout\n---\n");
-  assert.match(p.bash("pnpm release").stderr, /use \$\{deploy\}, which \.flow\/demo-flow\/project\.md does not bind/);
-  assert.equal(p.bash("make build").status, 2);
-  assert.equal(p.bash("cat README.md | grep x").status, 0);
-  assert.equal(p.bash("git status").status, 0);
-  assert.equal(p.bash("ls > out.txt").status, 2);
-  assert.equal(p.bash(`node ${path.join(p.skill, "scripts", "flow.mjs")} status`).status, 0);
-  // Edits are not guarded commands; under standard rails they stay free without a run.
-  assert.equal(p.write("src/app.js").status, 0);
-  p.cli("suspend");
-  assert.equal(p.bash("make build").status, 0);
+  for (const c of ["make build", "npm test", "ls > out.txt"]) assert.equal(p.bash(c).status, 0, c);
+  assert.match(p.hook("session-start", {}).stdout, /Guarded commands that use \$\{deploy\} are not recognized either/);
+  assert.match(p.cli("start", "spike", "--request", "x").stderr, /has not bound deploy/);
+  // The rails' own protections do not wait for the bindings.
+  assert.equal(p.bash("rm -rf .flow").status, 2);
 });

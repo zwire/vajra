@@ -17,7 +17,7 @@ If the user gave nothing beyond "make me one", ask a single open question: *"How
 
 Before asking anything, look at what already answers profile and domain questions:
 
-- Repository: languages, test setup, CI config, deploy config, `CONTRIBUTING.md`, PR templates, existing skills (`.agents/skills/`, `skills/`, or an agent's own skill directory), and which coding agents are configured (`.claude/`, `.codex/`, `.cursor/`, `.github/copilot-instructions.md` or `.github/hooks/`, `.agents/hooks.json` (Antigravity), `.qwen/`, `.factory/`, `.windsurf/` or `.devin/`).
+- Repository: languages, test setup, CI config, deploy config, `CONTRIBUTING.md`, PR templates, existing skills (`.agents/skills/`, `skills/`, or an agent's own skill directory), and which coding agents are configured (`.claude/`, `.codex/`, `.github/copilot-instructions.md` or `.github/hooks/`).
 - Toolchain: VCS host, CI, test runner, linter, type checker, package manager, exact commands.
 - Domain signals: simulators, launch files, datasets and data directories, notebooks, benchmarks, golden files, device configs, migration tools, store or registry configs, the words in READMEs and issue titles.
 - Maturity signals: tests present or absent, release tags, monitoring config, number of contributors.
@@ -122,7 +122,7 @@ Check that the expected entry matches, the exits you need are open, human gates 
 
 ## 10. Install the rails
 
-Explain what the hooks will enforce at the chosen `rails` level and where enforcement ends (see [../references/rails.md](../references/rails.md)). Detect which agents the project uses from their configuration directories (`.claude/`, `.codex/`, `.cursor/`, `.github/hooks/`, `.agents/hooks.json`, `.qwen/`, `.factory/`, `.windsurf/` or `.devin/`) and ask about any others. Then:
+Explain what the hooks will enforce at the chosen `rails` level and where enforcement ends (see [../references/rails.md](../references/rails.md)). Detect which of the supported agents (Claude Code, Codex, GitHub Copilot) the project uses from `.claude/`, `.codex/` and `.github/hooks/`. Then:
 
 1. [human-gate] Ask the user whether to install the hooks, for which agents, and at which scope (shared project settings or personal settings).
 2. On yes, run `node <skill>/scripts/flow.mjs install --harness <agents> [--scope local]`. Show the files it changed.

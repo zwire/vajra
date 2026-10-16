@@ -4,9 +4,9 @@
 // Puts the agent on the rails of the graph instead of trusting it to follow prose. The runtime
 // keeps the run state (a checkpoint: which playbook owns the request, which steps are done),
 // refuses every move the graph does not allow, runs each playbook's checks before its exits open,
-// and interrupts at every [human-gate] until the human resumes it. It is tool-agnostic: the agent
-// drives it as a CLI (no context cost until used), and the lifecycle-hook protocol shared by current
-// coding agents (JSON on stdin, exit code 2 blocks) enforces it whether or not the agent cooperates.
+// and interrupts at every [human-gate] until the human resumes it. The agent drives it as a CLI (no
+// context cost until used), and lifecycle hooks in Claude Code, Codex and GitHub Copilot (JSON on
+// stdin, exit code 2 blocks) enforce it whether or not the agent cooperates.
 // An MCP server is available as an opt-in for clients that support MCP elicitation.
 //
 // Agent commands:
@@ -22,9 +22,9 @@
 //   flow reject --reason <text>                   refuse it
 //   flow suspend  |  flow unsuspend               turn the hooks off and on
 // Integration:
-//   flow hook <session-start|user-prompt|pre-tool-use|stop> [--format copilot|antigravity]
+//   flow hook <session-start|user-prompt|pre-tool-use|stop> [--format copilot]
 //                                                 lifecycle hook (JSON on stdin)
-//   flow install --harness <claude|codex|cursor|copilot|antigravity|qwen|factory|windsurf>[,...]
+//   flow install --harness <claude|codex|copilot>[,...]
 //                [--scope project|local] [--mcp] [--dry-run]
 //                                                 hooks, plus a .flow/<skill>/project.md skeleton
 //                                                 for the skill's bindings when there is none
@@ -46,7 +46,7 @@ import { fileURLToPath } from "node:url";
 // caught: a hook that failed to start would exit 1, which agents treat as "allow" (see main).
 const REQUIRED = {
   "validate.mjs": ["validateSkill", "commandMatches", "globToRegExp", "readProject", "projectFile", "resolveText", "resolveList", "VERSION"],
-  "guard.mjs": ["guardMatches", "normalizePayload", "toolAction", "shellViolation", "readOnly", "dropsHooks", "railsPaths", "inside", "samePath", "codeTouchesRails"],
+  "guard.mjs": ["guardMatches", "toolAction", "shellViolation", "dropsHooks", "railsPaths", "inside", "samePath", "codeTouchesRails"],
 };
 let loadError = null;
 const lib = {};
@@ -59,7 +59,7 @@ for (const [file, names] of Object.entries(REQUIRED)) {
   } catch (e) { loadError ||= `${file}: ${e.message}`; }
 }
 const { validateSkill, commandMatches, globToRegExp, readProject, projectFile, resolveText, resolveList, VERSION } = lib;
-const { guardMatches, normalizePayload, toolAction, shellViolation, readOnly, dropsHooks, railsPaths, inside, samePath, codeTouchesRails } = lib;
+const { guardMatches, toolAction, shellViolation, dropsHooks, railsPaths, inside, samePath, codeTouchesRails } = lib;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(process.env.FLOW_SKILL || path.join(here, ".."));
@@ -80,7 +80,7 @@ const railsLevel = (g) => g.profile.rails || "standard";
 
 export function findRoot(start = process.cwd()) {
   if (process.env.FLOW_ROOT) return path.resolve(process.env.FLOW_ROOT);
-  for (const v of ["CLAUDE_PROJECT_DIR", "CURSOR_PROJECT_DIR", "QWEN_PROJECT_DIR", "FACTORY_PROJECT_DIR"]) if (process.env[v]) return path.resolve(process.env[v]);
+  if (process.env.CLAUDE_PROJECT_DIR) return path.resolve(process.env.CLAUDE_PROJECT_DIR);
   let d = path.resolve(start);
   for (;;) {
     if (fs.existsSync(path.join(d, ".flow")) || fs.existsSync(path.join(d, ".git"))) return d;
@@ -209,7 +209,8 @@ function describe(g, state, root) {
   const run = state.run;
   if (g.unbound.length) {
     const what = g.unbound.map((n) => `${n} (${g.bindings[n] || "not declared in bindings.md"})`).join("; ");
-    const note = `${tag} This project has not bound ${what}. The user writes the values in ${g.projectFile}; until then no run can start.`;
+    const guards = g.unboundGuards.length ? ` Guarded commands that use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")} are not recognized either, so ask before anything irreversible.` : "";
+    const note = `${tag} This project has not bound ${what}. The user writes the values in ${g.projectFile}; until then no run can start.${guards}`;
     if (!run) return note;
     return `${note}\n${describeRun(g, state, root)}`;
   }
@@ -370,77 +371,32 @@ function cmdLog(st) {
 }
 
 // ---------- install: hooks and MCP registration per harness ----------
-// The runtime is the same everywhere; only the configuration files differ. Every harness below
-// runs hook commands with a JSON payload on stdin and treats exit code 2 as "block".
-// `hooks` names the file (and `top` when events sit at its top level instead of under "hooks";
-// `group` names a top-level key to put them under instead), `entry` shapes one hook entry,
-// `cwd` is the directory the agent runs hooks in, and an event may map to several native events
-// or be absent.
+// The runtime is the same for every agent; only the configuration files differ. Each one runs
+// hook commands with a JSON payload on stdin and treats exit code 2 as "block".
 
-const CLAUDE_EVENTS = { "session-start": "SessionStart", "user-prompt": "UserPromptSubmit", "pre-tool-use": "PreToolUse", stop: "Stop" };
-const nested = (command) => ({ hooks: [{ type: "command", command }] });
+const EVENTS = { "session-start": "SessionStart", "user-prompt": "UserPromptSubmit", "pre-tool-use": "PreToolUse", stop: "Stop" };
 
 const HARNESSES = {
   claude: {
-    hooks: ({ scope }) => (scope === "local" ? ".claude/settings.local.json" : ".claude/settings.json"),
-    events: CLAUDE_EVENTS,
+    hooks: (scope) => (scope === "local" ? ".claude/settings.local.json" : ".claude/settings.json"),
     rootVar: "$CLAUDE_PROJECT_DIR",
+    entry: (command) => ({ hooks: [{ type: "command", command }] }),
     mcp: { file: ".mcp.json", format: "json" },
   },
   codex: {
     hooks: () => ".codex/hooks.json",
-    events: CLAUDE_EVENTS,
+    entry: (command) => ({ hooks: [{ type: "command", command }] }),
     mcp: { file: ".codex/config.toml", format: "toml" },
     note: "Codex runs project hooks only with `codex_hooks = true` under [features] in .codex/config.toml.",
-  },
-  cursor: {
-    hooks: () => ".cursor/hooks.json",
-    events: { "session-start": "sessionStart", "user-prompt": "beforeSubmitPrompt", "pre-tool-use": "preToolUse", stop: "stop" },
-    entry: (command) => ({ command }),
-    version: 1,
-    mcp: { file: ".cursor/mcp.json", format: "json" },
   },
   // Copilot CLI, cloud agent and VS Code all read .github/hooks/*.json. PascalCase event names
   // select the snake_case payload the hook reads; --format copilot shapes the output (see runHook).
   copilot: {
     hooks: () => `.github/hooks/${skillName}.json`,
-    events: CLAUDE_EVENTS,
-    args: "--format copilot",
+    args: " --format copilot",
     entry: (command) => ({ type: "command", command, cwd: "." }),
     version: 1,
     note: "Copilot CLI runs repository hooks only in a folder you have trusted, and ignores UserPromptSubmit output, so run state is injected only at session start; chat approvals are still recorded.",
-  },
-  // Antigravity (CLI, IDE and app) reads .agents/hooks.json, keyed by hook name, and runs hooks in
-  // .agents/. It has no prompt hook: PreInvocation stands in for it, and chat approvals are not seen.
-  antigravity: {
-    hooks: () => ".agents/hooks.json",
-    group: () => skillName,
-    events: { "user-prompt": "PreInvocation", "pre-tool-use": "PreToolUse", stop: "Stop" },
-    entry: (command, native) => (native === "PreToolUse" ? { matcher: ".*", hooks: [{ type: "command", command }] } : { type: "command", command }),
-    cwd: ".agents",
-    args: "--format antigravity",
-    note: "Antigravity has no prompt hook, so human gates are passed with `flow approve` in a terminal, and it skips every hook under --dangerously-skip-permissions.",
-  },
-  qwen: {
-    hooks: () => ".qwen/settings.json",
-    events: CLAUDE_EVENTS,
-    rootVar: "$QWEN_PROJECT_DIR",
-    mcp: { file: ".qwen/settings.json", format: "json" },
-    note: "Qwen Code loads project hooks only in a trusted folder.",
-  },
-  // Droid reads the hooks key of settings.json only when hooks.json is absent.
-  factory: {
-    hooks: ({ exists }) => (exists(".factory/hooks.json") ? { file: ".factory/hooks.json", top: true } : ".factory/settings.json"),
-    events: CLAUDE_EVENTS,
-    rootVar: "$FACTORY_PROJECT_DIR",
-  },
-  // Cascade reads the legacy .windsurf/hooks.json only when .devin/hooks.json defines no hooks.
-  // It has no session-start or stop hooks, and its payload is normalized in normalizePayload().
-  windsurf: {
-    hooks: ({ exists }) => (exists(".devin/hooks.json") ? ".devin/hooks.json" : ".windsurf/hooks.json"),
-    events: { "user-prompt": "pre_user_prompt", "pre-tool-use": ["pre_run_command", "pre_write_code"] },
-    entry: (command) => ({ command, show_output: false }),
-    note: "Cascade cannot inject context or bounce a stop; it blocks guarded commands and out-of-bounds edits, and records chat approvals.",
   },
 };
 
@@ -463,21 +419,17 @@ function install(root, o) {
 
   for (const name of names) {
     const h = HARNESSES[name];
-    const fromCwd = h.cwd ? relPath(path.join(root, h.cwd), script) : rel;
-    const target = !inRoot ? JSON.stringify(script) : h.rootVar ? `"${h.rootVar}/${rel}"` : JSON.stringify(fromCwd);
-    const where = h.hooks({ scope, exists: (f) => writes.has(f) || fs.existsSync(path.join(root, f)) });
-    const { file, top } = typeof where === "string" ? { file: where } : where;
+    const target = !inRoot ? JSON.stringify(script) : h.rootVar ? `"${h.rootVar}/${rel}"` : JSON.stringify(rel);
+    const file = h.hooks(scope);
     const cfg = load(file);
     if (h.version) cfg.version ||= h.version;
-    const events = top ? cfg : h.group ? (cfg[h.group()] ||= {}) : (cfg.hooks ||= {});
+    const events = (cfg.hooks ||= {});
     const added = [];
-    for (const [ev, natives] of Object.entries(h.events)) {
-      const command = `node ${target} hook ${ev}${h.args ? ` ${h.args}` : ""}`;
-      for (const native of [natives].flat()) {
-        const list = (events[native] ||= []);
-        const has = list.some((x) => x.command === command || (x.hooks || []).some((y) => y.command === command));
-        if (!has) { list.push((h.entry || nested)(command, native)); added.push(native); }
-      }
+    for (const [ev, native] of Object.entries(EVENTS)) {
+      const command = `node ${target} hook ${ev}${h.args || ""}`;
+      const list = (events[native] ||= []);
+      const has = list.some((x) => x.command === command || (x.hooks || []).some((y) => y.command === command));
+      if (!has) { list.push(h.entry(command)); added.push(native); }
     }
     writes.set(file, cfg);
     report.push(`${name}: ${added.length ? `hooks ${added.join(", ")} added` : "hooks already present"} in ${file}${h.note ? ` (${h.note})` : ""}`);
@@ -613,9 +565,6 @@ function preToolUse(g, state, input, root) {
   }
 
   for (const { command: cmd, ps } of act.lines || []) {
-    if (g.unboundGuards.length && !readOnly(cmd, ps)) {
-      return `guarded commands use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")}, which ${g.projectFile} does not bind, so they cannot be told apart from other commands. Only reading commands run until the user fills in those values.`;
-    }
     for (const node of g.nodes.values()) {
       for (const pat of node.guards) {
         if (!guardMatches(pat, cmd, { ps })) continue;
@@ -652,8 +601,6 @@ function stopCheck(g, state, input, root) {
 function context(input, text, format) {
   // hookSpecificOutput.additionalContext is understood by the agents that inject hook context.
   // Copilot CLI reads only a top-level additionalContext; VS Code reads hookSpecificOutput.
-  // Antigravity injects steps; an ephemeral message is shown to the model as a system message.
-  if (format === "antigravity") return JSON.stringify({ injectSteps: [{ ephemeralMessage: text }] });
   const out = { hookSpecificOutput: { hookEventName: input.hook_event_name || "SessionStart", additionalContext: text } };
   return JSON.stringify(format === "copilot" ? { additionalContext: text, ...out } : out);
 }
@@ -665,26 +612,18 @@ function blockTool(reason, format) {
     console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${tag} Blocked: ${reason}` } }));
     return 0;
   }
-  if (format === "antigravity") { console.log(JSON.stringify({ decision: "deny", reason: `${tag} Blocked: ${reason}` })); return 0; }
   process.stderr.write(`${tag} Blocked: ${reason}\n`);
   return 2;
 }
 
 function runHook(event, format) {
-  const input = normalizePayload(readStdin());
+  const input = readStdin();
   const root = findRoot(input.cwd || process.cwd());
   const g = loadGraph(root);
   const st = openStore(root);
   const state = st.load();
   if (event === "session-start") { console.log(context(input, describe(g, state, root), format)); return 0; }
   if (event === "user-prompt") {
-    if (format === "antigravity") {
-      // PreInvocation fires before every model call; inject once per turn, at its first call.
-      if (input.invocationNum !== 0) { console.log("{}"); return 0; }
-      const wait = state.run?.awaiting && !state.suspended ? `\n${tag} This agent cannot see chat replies to a gate: ask the user to run \`${flowCmd(root)} approve\` (or \`reject --reason "..."\`) in a terminal.` : "";
-      console.log(context(input, describe(g, state, root) + wait, format));
-      return 0;
-    }
     const p = String(input.prompt ?? input.user_prompt ?? input.message ?? "").trim();
     let note = "";
     if (g.ok && state.run?.awaiting && !state.suspended) {
@@ -705,18 +644,16 @@ function runHook(event, format) {
   }
   if (event === "pre-tool-use") {
     const reason = preToolUse(g, state, input, root);
-    // Antigravity reads only a JSON decision and denies on anything else, even {}. "allow" still
-    // leaves its own permission prompts in place (checked against agy 1.3.3).
-    if (!reason) { if (format === "antigravity") console.log(JSON.stringify({ decision: "allow" })); return 0; }
+    if (!reason) return 0;
     st.log({ event: "block-tool", tool: input.tool_name, reason });
     return blockTool(reason, format);
   }
   if (event === "stop") {
     const reason = stopCheck(g, state, input, root);
-    if (!reason) { if (format === "antigravity") console.log("{}"); return 0; }
+    if (!reason) return 0;
     st.save(state);
     st.log({ event: "block-stop", reason });
-    console.log(JSON.stringify({ decision: format === "antigravity" ? "continue" : "block", reason: `${tag} ${reason}` }));
+    console.log(JSON.stringify({ decision: "block", reason: `${tag} ${reason}` }));
     return 0;
   }
   console.error(`unknown hook event "${event}"`);
@@ -883,7 +820,6 @@ export function main(argv) {
       // A crashed tool hook exits 1, which agents treat as "allow"; refuse the call instead.
       if (rest[0] === "pre-tool-use") return blockTool(`the rails could not check this call (${e.message}). Stop and ask the user.`, format);
       if (rest[0] === "session-start" || rest[0] === "user-prompt") console.log(context({ hook_event_name: rest[0] === "user-prompt" ? "UserPromptSubmit" : "SessionStart" }, `${tag} The rails are broken (${e.message}); every tool call is blocked until the user repairs the skill's scripts/.`, format));
-      else if (format === "antigravity") console.log("{}");
       return 0;
     }
   }
