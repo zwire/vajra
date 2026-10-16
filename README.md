@@ -217,7 +217,7 @@ $ flow step 2
 STOP. Step 2 is a human gate: "The product owner approves the held-out evaluation and the 1% stage."
 Present what the user needs to decide, then end your turn. Only the user can pass it.
 $ (agent) node .../flow.mjs approve
-[search-ranking-flow] Blocked: only the user can approve, reject or suspend. Stop and ask them.
+[search-ranking-flow] Blocked: only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.
 > (user) approve, go to 1%
 [search-ranking-flow] The user approved step 2 of ab-ramp.
 $ (agent) abctl ramp search-ranker-0412 --percent 1                    # allowed

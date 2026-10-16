@@ -70,154 +70,230 @@ export function commandMatches(pattern, command) {
   return re ? new RegExp(re[1], re[2]).test(cmd) : cmd.includes(pattern.replace(/\s+/g, " ").trim());
 }
 
-// ---------- shell commands (flow.mjs matches guards against these) ----------
-// A small POSIX-shell reader: splits a command line into the simple commands it would run, with
-// their words unquoted. Text that is only data (quoted arguments, comments, heredoc bodies) stays
-// inside one word or is dropped, while code the shell would run from inside it ($(...), `...`,
-// <(...), and the script of `sh -c`, `eval`, `ssh` and `watch`) is read as commands of its own.
-// Returns null when the line cannot be read (an unclosed quote, say), so callers can fail closed.
+// ---------- shell commands (flow.mjs checks guards and the run state against these) ----------
+// A small reader for POSIX shells and PowerShell: splits a command line into the simple commands
+// it would run, with their words unquoted. Text that is only data (quoted arguments, comments,
+// heredoc bodies) stays inside one word or is dropped, while code the shell would run from inside
+// it is read as commands of its own: $(...), `...` and <(...); the script of `sh -c`, `eval`,
+// `ssh`, `watch`, `pwsh -Command`, `pwsh -EncodedCommand`, `cmd /c`, `Invoke-Expression` and
+// `Start-Process`; and heredocs or pipes that feed a shell its script on stdin.
+// Each command is an array of { text, quoted, redir } words; `ps` on the array marks PowerShell.
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "su"]);
-const WRAPPERS = new Set(["sudo", "env", "exec", "nohup", "command", "time", "nice", "doas"]);
+const POWERSHELLS = new Set(["pwsh", "powershell"]);
+const WRAPPERS = new Set(["sudo", "env", "exec", "nohup", "command", "time", "nice", "doas", "&", "."]);
 const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time"]);
+const MAX_DEPTH = 8;
 
-function closing(s, i, open, close) {
+// The program a word names, as the shell would look it up: no directory, no .exe, any case.
+export const programName = (t) => t.replace(/\\/g, "/").split("/").pop().toLowerCase().replace(/\.exe$/, "");
+
+// Index of the first word that is the program itself, past assignments and wrappers like sudo.
+export function commandStart(w) {
+  let k = 0;
+  while (k < w.length - 1 && (/^\w+=/.test(w[k].text) || (k > 0 && /^-/.test(w[k].text)) || WRAPPERS.has(programName(w[k].text)))) k++;
+  return k;
+}
+
+function closing(s, i, open, close, esc) {
   // i is just past `open`; returns the index of the matching `close`, skipping quotes and escapes.
   for (let depth = 1; i < s.length; i++) {
     const c = s[i];
-    if (c === "\\") i++;
+    if (c === esc) i++;
     else if (c === "'") { i = s.indexOf("'", i + 1); if (i < 0) break; }
-    else if (c === '"') { for (i++; i < s.length && s[i] !== '"'; i++) if (s[i] === "\\") i++; }
+    else if (c === '"') { for (i++; i < s.length && s[i] !== '"'; i++) if (s[i] === esc) i++; }
     else if (c === open) depth++;
     else if (c === close && --depth === 0) return i;
   }
   throw new Error("unclosed " + open);
 }
 
-// Commands substituted inside double quotes or an unquoted heredoc body.
-function substitutions(s, nested) {
+// Commands substituted inside double quotes, here-strings or an unquoted heredoc body.
+function substitutions(s, nested, ps) {
+  const esc = ps ? "`" : "\\";
   for (let i = 0; i < s.length; i++) {
-    if (s[i] === "\\") i++;
-    else if (s[i] === "$" && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")"); nested.push(s.slice(i + 2, e)); i = e; }
-    else if (s[i] === "`") { const e = s.indexOf("`", i + 1); if (e < 0) throw new Error("unclosed `"); nested.push(s.slice(i + 1, e)); i = e; }
+    if (s[i] === esc) i++;
+    else if (s[i] === "$" && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")", esc); nested.push({ text: s.slice(i + 2, e), ps }); i = e; }
+    else if (!ps && s[i] === "`") { const e = s.indexOf("`", i + 1); if (e < 0) throw new Error("unclosed `"); nested.push({ text: s.slice(i + 1, e), ps }); i = e; }
   }
 }
 
-function readShell(s, depth) {
-  const cmds = [], nested = [], heredocs = [], bodies = [];
-  let words = [], word = null, redir = false;
+function decodeEncodedCommand(b64) {
+  try { return Buffer.from(b64, "base64").toString("utf16le"); } catch { return ""; }
+}
+
+function tokenize(s, ps, nested, bodies) {
+  const cmds = [], heredocs = [];
+  let words = [], word = null, redir = false, piped = false;
   const flush = () => { if (word) { words.push(word); word = null; } };
-  const end = () => { flush(); if (words.length) cmds.push(words); words = []; redir = false; };
+  const end = (pipe = false) => { flush(); if (words.length) { words.piped = piped; cmds.push(words); } words = []; redir = false; piped = pipe; };
   const add = (t, quoted) => { word ||= { text: "", quoted: false, redir }; word.text += t; word.quoted ||= quoted; redir = false; };
+  const esc = ps ? "`" : "\\";
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
+    if (c === "\r") continue;
     if (c === "\n") {
       end();
       for (const h of heredocs) {
         const lines = [];
         let j = i + 1;
         for (;;) {
-          const nl = s.indexOf("\n", j), line = s.slice(j, nl < 0 ? s.length : nl);
+          const nl = s.indexOf("\n", j), line = s.slice(j, nl < 0 ? s.length : nl).replace(/\r$/, "");
           j = nl < 0 ? s.length : nl + 1;
           if ((h.tabs ? line.replace(/^\t+/, "") : line) === h.delim) break;
           lines.push(line);
           if (nl < 0) break;
         }
         bodies.push(lines.join("\n"));
-        if (!h.quoted) substitutions(bodies[bodies.length - 1], nested);
+        if (!h.quoted) substitutions(bodies[bodies.length - 1], nested, false);
         i = j - 1;
       }
       heredocs.length = 0;
     } else if (c === " " || c === "\t") flush();
+    else if (ps && c === "<" && s[i + 1] === "#") { const e = s.indexOf("#>", i + 2); if (e < 0) throw new Error("unclosed <#"); i = e + 1; }
     else if (c === "#" && !word) { const nl = s.indexOf("\n", i); i = (nl < 0 ? s.length : nl) - 1; }
-    else if (c === "\\") { if (s[i + 1] !== "\n") add(s[i + 1] ?? "", false); i++; }
-    else if (c === "'") { const e = s.indexOf("'", i + 1); if (e < 0) throw new Error("unclosed '"); add(s.slice(i + 1, e), true); i = e; }
-    else if (c === '"') {
+    else if (c === esc) { if (s[i + 1] !== "\n") add(s[i + 1] ?? "", false); i++; }
+    else if (ps && c === "@" && (s[i + 1] === '"' || s[i + 1] === "'") && /^\r?\n/.test(s.slice(i + 2))) {
+      // PowerShell here-string: data up to a line that starts with "@ or '@.
+      const q = s[i + 1], e = s.indexOf(`\n${q}@`, i + 2);
+      if (e < 0) throw new Error("unclosed here-string");
+      const t = s.slice(s.indexOf("\n", i) + 1, e).replace(/\r$/, "");
+      if (q === '"') substitutions(t, nested, true);
+      add(t, true); i = e + 2;
+    } else if (c === "'") {
       let t = "", j = i + 1;
-      for (; j < s.length && s[j] !== '"'; j++) {
-        if (s[j] === "\\" && '"\\$`\n'.includes(s[j + 1])) t += s[++j];
-        else if (s[j] === "$" && s[j + 1] === "(") { const e = closing(s, j + 2, "(", ")"); t += s.slice(j, e + 1); j = e; }
-        else if (s[j] === "`") { const e = s.indexOf("`", j + 1); if (e < 0) throw new Error("unclosed `"); t += s.slice(j, e + 1); j = e; }
-        else t += s[j];
+      for (;; j++) {
+        const e = s.indexOf("'", j);
+        if (e < 0) throw new Error("unclosed '");
+        t += s.slice(j, e);
+        if (ps && s[e + 1] === "'") { t += "'"; j = e + 1; continue; }
+        j = e; break;
+      }
+      add(t, true); i = j;
+    } else if (c === '"') {
+      let t = "", raw = "", j = i + 1;
+      for (; j < s.length; j++) {
+        if (s[j] === '"') { if (ps && s[j + 1] === '"') { t += '"'; raw += '""'; j++; continue; } break; }
+        if (s[j] === esc && (ps || '"\\$`\n'.includes(s[j + 1]))) { t += s[j + 1]; raw += s[j] + s[j + 1]; j++; }
+        else if (s[j] === "$" && s[j + 1] === "(") { const e = closing(s, j + 2, "(", ")", esc); t += s.slice(j, e + 1); raw += s.slice(j, e + 1); j = e; }
+        else if (!ps && s[j] === "`") { const e = s.indexOf("`", j + 1); if (e < 0) throw new Error("unclosed `"); t += s.slice(j, e + 1); raw += s.slice(j, e + 1); j = e; }
+        else { t += s[j]; raw += s[j]; }
       }
       if (j >= s.length) throw new Error('unclosed "');
-      substitutions(t, nested);
+      substitutions(raw, nested, ps);
       add(t, true); i = j;
-    } else if (c === "$" && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")"); nested.push(s.slice(i + 2, e)); add(s.slice(i, e + 1), false); i = e; }
-    else if (c === "`") { const e = s.indexOf("`", i + 1); if (e < 0) throw new Error("unclosed `"); nested.push(s.slice(i + 1, e)); add(s.slice(i, e + 1), false); i = e; }
-    else if ((c === "<" || c === ">") && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")"); nested.push(s.slice(i + 2, e)); flush(); i = e; }
+    } else if ((c === "$" || (ps && c === "@")) && s[i + 1] === "(") {
+      const e = closing(s, i + 2, "(", ")", esc); nested.push({ text: s.slice(i + 2, e), ps }); add(s.slice(i, e + 1), false); i = e;
+    } else if (!ps && c === "`") { const e = s.indexOf("`", i + 1); if (e < 0) throw new Error("unclosed `"); nested.push({ text: s.slice(i + 1, e), ps }); add(s.slice(i, e + 1), false); i = e; }
+    else if (!ps && (c === "<" || c === ">") && s[i + 1] === "(") { const e = closing(s, i + 2, "(", ")", esc); nested.push({ text: s.slice(i + 2, e), ps }); flush(); i = e; }
     else if (c === "<" || c === ">") {
-      if (word && /^\d+$/.test(word.text) && !word.quoted) word = null; // 2>&1: the fd is not a word
+      if (word && !word.quoted && (/^\d+$/.test(word.text) || (ps && word.text === "*"))) word = null; // 2>&1, *>: the stream is not a word
       flush();
       const op = s.slice(i).match(/^(<<-|<<<|<<|<>|>>|>\||[<>]&?|&?>>?)/)[0];
       i += op.length - 1;
-      if (op === "<<" || op === "<<-") {
+      if (!ps && (op === "<<" || op === "<<-")) {
         const m = s.slice(i + 1).match(/^[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()]+))/);
         if (!m) throw new Error("heredoc without delimiter");
         heredocs.push({ delim: m[1] ?? m[2] ?? m[3], quoted: m[1] !== undefined || m[2] !== undefined || m[0].includes("\\"), tabs: op === "<<-" });
         i += m[0].length;
       } else redir = true;
-    } else if (c === "&" && s[i + 1] === ">") { flush(); i += s[i + 2] === ">" ? 2 : 1; redir = true; }
-    else if (";&|()".includes(c)) end();
+    } else if (!ps && c === "&" && s[i + 1] === ">") { flush(); i += s[i + 2] === ">" ? 2 : 1; redir = true; }
+    else if (c === "|" && s[i + 1] === "|") { end(); i++; }
+    else if (c === "|") { end(true); if (s[i + 1] === "&") i++; }
+    else if (";&|()".includes(c) || (ps && "{}".includes(c))) end();
     else add(c, false);
   }
   end();
+  return cmds;
+}
+
+function readShell(s, depth, ps) {
+  const nested = [], bodies = [];
   const out = [];
-  for (let w of cmds) {
-    while (w.length && !w[0].quoted && KEYWORDS.has(w[0].text)) w = w.slice(1);
+  for (let w of tokenize(s, ps, nested, bodies)) {
+    while (w.length && !w[0].quoted && (ps ? ["&", "."].includes(w[0].text) : KEYWORDS.has(w[0].text))) w = w.slice(1);
     if (!w.length) continue;
+    const piped = w.piped;
+    w.ps = ps;
+    w.piped = piped;
     out.push(w);
-    if (depth >= 8) continue;
-    // Shells and wrappers that run a string as a command.
-    const base = (t) => t.split("/").pop();
-    const head = base(w[0].text);
-    for (let k = 0; k < w.length - 1; k++) {
-      if (SHELLS.has(base(w[k].text))) {
+    const rest = (k) => w.slice(k).map((x) => x.text).join(" ");
+    for (let k = 0; k < w.length; k++) {
+      const name = programName(w[k].text);
+      if (SHELLS.has(name)) {
         const c = w.findIndex((x, j) => j > k && /^-[a-z]*c[a-z]*$/i.test(x.text));
-        if (c > 0 && w[c + 1]) nested.push(w[c + 1].text);
+        if (c > 0 && w[c + 1]) nested.push({ text: w[c + 1].text, ps: false });
+      } else if (POWERSHELLS.has(name)) {
+        // Every argument may be the script (-Command, or positional for powershell.exe); an encoded one is decoded.
+        nested.push({ text: rest(k + 1), ps: true });
+        for (let j = k + 1; j < w.length - 1; j++) {
+          if (/^[-/](e|ec|en[a-z]*)$/i.test(w[j].text)) nested.push({ text: decodeEncodedCommand(w[j + 1].text), ps: true });
+        }
+      } else if (name === "cmd" && w.slice(k + 1).some((x) => /^\/[ck]$/i.test(x.text))) {
+        nested.push({ text: rest(w.findIndex((x, j) => j > k && /^\/[ck]$/i.test(x.text)) + 1), ps: true });
       }
     }
-    if (head === "eval" || head === "watch") nested.push(w.slice(1).map((x) => x.text).join(" "));
-    if (head === "ssh") for (let k = 1; k < w.length; k++) nested.push(w.slice(k).map((x) => x.text).join(" "));
+    const head = programName(w[commandStart(w)].text);
+    if (head === "eval" || head === "watch") nested.push({ text: rest(commandStart(w) + 1), ps });
+    if (["invoke-expression", "iex", "start-process", "saps", "start", "invoke-command", "icm"].includes(head)) {
+      nested.push({ text: rest(commandStart(w) + 1), ps: true });
+      // Start-Process npm -ArgumentList 'run deploy' runs `npm run deploy`.
+      nested.push({ text: w.slice(commandStart(w) + 1).filter((x) => !/^-/.test(x.text)).map((x) => x.text.replace(/,/g, " ")).join(" "), ps: true });
+    }
+    if (head === "ssh") for (let k = 1; k < w.length; k++) nested.push({ text: rest(k), ps });
   }
-  // A shell reading its script from stdin (`bash <<EOF`, `cat x | sh`, `bash <<< "..."`) runs
-  // whatever the line feeds it, so heredoc bodies and the other commands' arguments become code.
-  const feedsShell = out.some((w) => {
-    let k = 0;
-    while (k < w.length - 1 && (/^\w+=/.test(w[k].text) || /^-/.test(w[k].text) || WRAPPERS.has(w[k].text))) k++;
-    return SHELLS.has(w[k].text.split("/").pop()) && w.slice(k + 1).every((x) => x.redir || (/^-/.test(x.text) && !/^-[a-z]*c[a-z]*$/i.test(x.text)));
-  });
-  if (feedsShell && depth < 8) {
-    nested.push(...bodies);
-    for (const w of out) if (w.length > 1) nested.push(w.slice(1).map((x) => x.text).join(" "));
+  // A shell reading its script from stdin (`bash <<EOF`, `cat x | sh`, `bash <<< "..."`,
+  // `"..." | pwsh -Command -`) runs whatever the line feeds it: heredoc bodies and the other
+  // commands' arguments become code.
+  for (const w of out) {
+    const k = commandStart(w), name = programName(w[k].text), args = w.slice(k + 1);
+    const flagsOnly = args.every((x) => x.redir || x.text === "-" || /^-(?!c$|[a-z]*c$)/i.test(x.text) || (POWERSHELLS.has(name) && /^-(c|com\w*)$/i.test(x.text)));
+    const stdinShell = SHELLS.has(name) ? flagsOnly && !args.some((x) => /^-[a-z]*c[a-z]*$/i.test(x.text))
+      : POWERSHELLS.has(name) ? flagsOnly || args.some((x) => x.text === "-")
+      : name === "cmd" ? !args.some((x) => /^\/[ck]$/i.test(x.text)) : false;
+    if (!stdinShell) continue;
+    const dialect = !SHELLS.has(name);
+    for (const b of bodies) nested.push({ text: b, ps: dialect });
+    for (const v of out) if (v !== w) nested.push({ text: v.slice(v[0].quoted ? 0 : 1).map((x) => x.text).join(" "), ps: dialect });
+    for (const x of args) if (x.redir) nested.push({ text: x.text, ps: dialect });
   }
-  for (const n of nested) out.push(...(depth < 8 ? readShell(n, depth + 1) : []));
+  if (depth < MAX_DEPTH) for (const n of nested) out.push(...readShell(n.text, depth + 1, n.ps));
   return out;
 }
 
-export function shellCommands(command) {
-  try { return readShell(String(command), 0); } catch { return null; }
+// Reads a command line as POSIX shell and, when `ps` is set, also as PowerShell, so a check sees
+// every way the line could run. `failed` is set when a reading failed (an unclosed quote, say);
+// callers then also check the raw text, so they fail closed.
+export function shellCommands(command, { ps = false } = {}) {
+  const cmds = [];
+  let failed = false;
+  for (const dialect of ps ? [false, true] : [false]) {
+    try { cmds.push(...readShell(String(command), 0, dialect)); } catch { failed = true; }
+  }
+  return { cmds, failed };
 }
 
 // A command guard matches where a command, or a path to the program it runs, starts: at its first
 // word, at an unquoted later word (`sudo npm run deploy`, `bash scripts/release.sh`), or after a `/`
 // in one (`./scripts/release.sh`). A match that starts inside a quoted argument (a commit message,
-// a grep pattern) is data, not a command. Lines the reader cannot parse fall back to commandMatches.
-export function guardMatches(pattern, command) {
-  const cmds = shellCommands(command);
-  if (!cmds) return commandMatches(pattern, command);
+// a grep pattern) is data, not a command. PowerShell is matched without regard to case, as it runs
+// commands. A line the reader cannot parse is also matched as plain text.
+export function guardMatches(pattern, command, { ps = false } = {}) {
+  const { cmds, failed } = shellCommands(command, { ps });
+  if (failed && commandMatches(pattern, command)) return true;
   const re = pattern.match(/^\/(.+)\/([a-z]*)$/);
-  const sticky = re && new RegExp(re[1], re[2].replace(/[gy]/g, "") + "y");
-  const lit = pattern.replace(/\s+/g, " ").trim();
   for (const w of cmds) {
-    if (["echo", "printf"].includes(w[0].text)) continue;
-    const text = w.map((x) => x.text).join(" ");
+    if (["echo", "printf", "write-output", "write-host"].includes(programName(w[0].text))) continue;
+    const sticky = re && new RegExp(re[1], re[2].replace(/[gy]/g, "") + (w.ps && !re[2].includes("i") ? "iy" : "y"));
+    const lit = pattern.replace(/\s+/g, " ").trim();
+    const norm = (t) => (w.ps ? t.toLowerCase() : t);
+    const text = w.map((x) => x.text.replace(/\\/g, w.ps ? "/" : "\\")).join(" ");
     let at = 0;
     for (const [k, x] of w.entries()) {
       if (!x.redir && (k === 0 || (!x.quoted && !/\s/.test(x.text)))) {
         for (let j = 0; j < x.text.length; j++) {
-          if (j > 0 && x.text[j - 1] !== "/") continue;
+          if (j > 0 && !"/\\".includes(x.text[j - 1])) continue;
           const rest = text.slice(at + j);
-          if (sticky ? (sticky.lastIndex = 0, sticky.test(rest)) : rest.startsWith(lit)) return true;
+          if (sticky ? (sticky.lastIndex = 0, sticky.test(rest)) : norm(rest).startsWith(norm(lit))) return true;
         }
       }
       at += x.text.length + 1;

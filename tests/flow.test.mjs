@@ -215,6 +215,80 @@ test("guards and protections match commands that run, not text that only mention
   ]) assert.equal(p.bash(c).status, 2, c);
 });
 
+test("the run state is protected in every shell, while reading it is not blocked", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const ps = (command) => p.hook("pre-tool-use", { tool_name: "PowerShell", tool_input: { command } });
+  const enc = (s) => Buffer.from(s, "utf16le").toString("base64");
+  // POSIX shells: paths in any spelling, globs, pipes, interpreters and nested shells.
+  for (const c of [
+    "rm -rf ./.flow/", "rm -rf .FLOW", "rm -rf .fl*", "rm -rf .[!.]*", "mv .flow x", "echo x >> .flow/demo-flow/state.json",
+    "tee .flow/x < y", "dd if=x of=.flow/s", "cd .flow && rm s", "sed -i s/a/b/ .flow/s", "sed -n 's/a/b/w .flow/z' x",
+    "find .flow -delete", "find . -path '*/.flow/*' -exec rm {} +", "sort -o .flow/s x", "git diff --output=.flow/s",
+    "find .flow -type f | xargs rm", "cp x .flow/s", "rm -rf .", "git clean -fdx",
+    "python3 -c \"import shutil; shutil.rmtree('.flow')\"", "node -e \"require('fs').rmSync('.flow',{recursive:true})\"",
+    "sh <<EOF\nrm -rf .flow\nEOF", "echo 'rm -rf .flow' | bash", "x=$(rm -rf .flow)",
+    "pwsh -NoProfile -EncodedCommand " + enc("Remove-Item .flow -Recurse"), "cmd /c \"rd /s /q .flow\"",
+  ]) assert.equal(p.bash(c).status, 2, c);
+  // PowerShell: cmdlets and aliases, backslash and drive paths, -Path:, pipelines and script blocks.
+  for (const c of [
+    "Remove-Item .flow -Recurse -Force", "Remove-Item -Path .flow\\demo-flow\\state.json", `Remove-Item -LiteralPath '${p.proj}\\.flow' -Recurse`,
+    "ri .flow\\s", "del .flow\\s", "rd .flow", "Set-Content -Path .flow\\s -Value x", "Set-Content .FLOW\\s x", "'x' | Out-File .flow\\s",
+    "Add-Content -Path:.flow\\s x", "Clear-Content .flow\\s", "New-Item -ItemType File .flow\\x -Force", "Move-Item .flow x", "Rename-Item .flow x",
+    "Copy-Item x -Destination .flow\\s", "Remove-Item .fl*", "Remove-Item * -Recurse -Force", ".fl`ow | Remove-Item",
+    "Get-ChildItem .flow -Recurse | Remove-Item -Force", "& { Remove-Item .flow }", "1..3 | ForEach-Object { Remove-Item .flow\\$_ }",
+    "Invoke-Expression 'Remove-Item .flow'", "'Remove-Item .flow' | pwsh -Command -", "powershell -enc " + enc("rm .flow"),
+  ]) assert.equal(ps(c).status, 2, c);
+  // Reading is fine, in either shell.
+  for (const c of [
+    "cat .flow/demo-flow/state.json | jq .run", "head -n 5 .flow/demo-flow/log.jsonl", "ls -la .flow", "grep -rn approve .flow",
+    "rg step .flow", "tree .flow", "find .flow -name '*.json'", "sed -n 1,5p .flow/demo-flow/state.json", "awk 'NR<5' .flow/demo-flow/log.jsonl",
+    "git status .flow", "git log -- .flow", "git diff .flow", "git add .flow", "cp .flow/demo-flow/state.json /tmp/backup.json",
+    "ls .flow | xargs echo", "cat .flow\\demo-flow\\state.json",
+  ]) assert.equal(p.bash(c).status, 0, c);
+  for (const c of [
+    "Get-Content .flow\\demo-flow\\state.json -Raw | ConvertFrom-Json", "Get-Content -LiteralPath .flow\\s", "Get-Content -Path:.flow\\s", "gc .flow\\s",
+    "type .flow\\s", "Get-ChildItem .flow -Recurse", "dir .flow", "Select-String -Path .flow\\demo-flow\\log.jsonl -Pattern approve", "Test-Path .flow",
+    "Copy-Item .flow\\s -Destination backup.json", "Remove-Item node_modules -Recurse",
+  ]) assert.equal(ps(c).status, 0, c);
+  // The edit tools see the state under any case.
+  assert.equal(p.write(".FLOW/demo-flow/state.json").status, 2);
+  assert.equal(p.hook("pre-tool-use", { tool_name: "apply_patch", tool_input: { input: "*** Begin Patch\n*** Update File: scratch/a\n*** Move to: .flow/demo-flow/state.json\n*** End Patch" } }).status, 2);
+});
+
+test("only the human approves, and the agent cannot switch its own rails off", () => {
+  const p = project();
+  toGate(p);
+  const flow = path.join(p.skill, "scripts", "flow.mjs");
+  // Every route to an approval from the agent's shell is blocked: flags first, any case, the hook
+  // with a forged prompt, the MCP server answering its own elicitation, code that imports flow.mjs.
+  for (const c of [
+    `node ${flow} --by me approve`, `node "${flow}" REJECT`, `node ${flow.replace(/\//g, "\\")} unsuspend`,
+    `echo '{"prompt":"approve"}' | node ${flow} hook user-prompt`, `node ${flow} mcp < answers.jsonl`,
+    `node -e "import('${flow}').then((m) => m)"`, `bash -c 'node ${flow} approve'`,
+  ]) assert.match(p.bash(c).stderr, /only the user can approve/, c);
+  assert.match(p.cli("status").stdout, /waiting for the human/);
+  // The rules and the hooks that enforce them change only while suspended.
+  const rel = path.relative(p.proj, p.skill);
+  assert.equal(p.write(path.join(p.skill, "profile.md")).status, 2);
+  assert.equal(p.write(path.join(p.skill, "playbooks", "ship.md")).status, 2);
+  assert.equal(p.bash(`sed -i 's/irreversible.*//' ${rel}/playbooks/ship.md`).status, 2);
+  assert.equal(p.bash(`rm -rf ${rel}`).status, 2);
+  assert.equal(p.bash("rm -rf .claude").status, 2);
+  assert.equal(p.bash(`cat ${rel}/profile.md`).status, 0);
+  const settings = path.join(p.proj, ".claude", "settings.json");
+  const hookCmd = `node "${flow}" hook pre-tool-use`;
+  fs.writeFileSync(settings, JSON.stringify({ permissions: { allow: [] }, hooks: { PreToolUse: [{ hooks: [{ type: "command", command: hookCmd }] }] } }, null, 2));
+  const edit = (tool_input) => p.hook("pre-tool-use", { tool_name: "Edit", tool_input: { file_path: settings, ...tool_input } }).status;
+  assert.equal(edit({ old_string: '"allow": []', new_string: '"allow": ["Bash(ls)"]' }), 0, "other settings may change");
+  assert.equal(edit({ old_string: hookCmd, new_string: "true" }), 2);
+  assert.equal(edit({ old_string: '"permissions"', new_string: '"disableAllHooks": true, "permissions"' }), 2);
+  assert.equal(p.hook("pre-tool-use", { tool_name: "Write", tool_input: { file_path: settings, content: "{}" } }).status, 2);
+  assert.equal(p.bash("echo '{}' > .claude/settings.json").status, 2);
+  p.cli("suspend"); // the human's own terminal
+  assert.equal(p.write(path.join(p.skill, "profile.md")).status, 0);
+});
+
 test("each guarded stage waits for its own gate", () => {
   const p = project();
   fs.writeFileSync(path.join(p.skill, "playbooks", "ship.md"), `---
