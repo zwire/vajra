@@ -19,10 +19,11 @@ const blueprints = fs.readdirSync(blueprintDir).filter((f) => f.endsWith(".md") 
 
 for (const ex of examples) {
   const dir = path.join(root, "examples", ex);
-  test(`example ${ex} is valid with no warnings`, () => {
-    const r = validateSkill(dir);
+  test(`example ${ex} is valid with no warnings, and its project binds every name`, () => {
+    const r = validateSkill(dir, { project: path.join(root, "examples", `${ex}.project.md`) });
     assert.deepEqual(r.errors, []);
     assert.deepEqual(r.warnings, []);
+    assert.ok(Object.keys(r.bindings).length > 0, "the example names its repository values through bindings");
   });
   test(`example ${ex} carries the current runtime`, () => {
     for (const f of ["flow.mjs", "validate.mjs"]) {

@@ -12,7 +12,7 @@ Show evidence from the real artifact (metrics, logs, video, test output), not a 
 
 ## Throwaway means throwaway
 
-Spike code lives in `scratch/`, is never imported by the stack, and is deleted after `decide`. Applies to spike and decide.
+Spike code lives in `${scratch}/`, is never imported by the stack, and is deleted after `decide`. Applies to spike and decide.
 
 ## Rebuild, don't promote
 
@@ -24,4 +24,4 @@ Every node that can command motion stops the arm on timeout, sensor dropout or e
 
 ## Gate the irreversible
 
-Stop for the operator before anything moves the real arm or changes safety limits. Applies wherever a step is tagged `[irreversible]`.
+Stop for the operator before anything moves the real arm or changes `${safety-limits}`. Applies wherever a step is tagged `[irreversible]`.

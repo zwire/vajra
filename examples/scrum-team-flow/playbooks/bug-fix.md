@@ -8,7 +8,7 @@ exits:
   - to: release-gate
     when: the fix is for a blocked release candidate and is merged
   - to: end
-    when: the fix is merged to main and verified
+    when: the fix is merged to the default branch and verified
 ---
 
 # Bug fix

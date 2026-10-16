@@ -4,10 +4,10 @@ title: Increment
 phase: expand
 lifecycle: tracer
 kind: work
-writes: [src/**, test/**, launch/**, config/perception/**, docs/**]
+writes: [${code}]
 checks:
-  - colcon build --symlink-install
-  - colcon test && colcon test-result --verbose
+  - ${build}
+  - ${test}
 exits:
   - to: dataset-curation
     when: the detector needs data it does not have
@@ -27,12 +27,12 @@ Deliver one slice of behavior in the real ROS 2 packages.
 2. Implement the smallest change in the real package structure.
 3. Give every node that can command motion a safe state on timeout, sensor dropout and exception.
 4. Write or update tests that replay recorded bags through the changed nodes.
-5. Run `colcon build --symlink-install` and `colcon test && colcon test-result --verbose`.
+5. Run `${build}` and `${test}`.
 6. Open a GitHub pull request and drive CI to green.
 
 ## Done when
 
-- Each acceptance criterion is shown met on bags replayed by `colcon test`, every motion-commanding node has a tested safe state, and CI is green on the pull request.
+- Each acceptance criterion is shown met on bags replayed by `${test}`, every motion-commanding node has a tested safe state, and CI is green on the pull request.
 
 ## Reply with
 

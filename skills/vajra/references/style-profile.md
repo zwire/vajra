@@ -21,7 +21,7 @@ The style profile is the normalized form of "how I want to work". Composition ru
 | `hardware` | `none` · `simulated` · `attached` · `custom-hardware` | Anything above `none` implies the `physical-world` facet, whose safety rules win |
 | `invocation` | `explicit` · `auto` | Whether the generated skill's description tells agents to run it only when invoked by name, or to trigger on matching tasks. Default `explicit` |
 | `rails` | `advisory` · `standard` · `strict` | How hard the runtime and hooks enforce the graph ([composition.md](composition.md#6-lay-the-rails)) |
-| `toolchain` | free-form map | Concrete commands: VCS host, CI, test, lint, typecheck, deploy, issue tracker |
+| `toolchain` | free-form map | Concrete commands: VCS host, CI, test, lint, typecheck, deploy, issue tracker. Recorded in the project file, not the skill; playbooks name them through bindings |
 | `vocabulary` | free-form map | The user's own words for things ("ticket", "story", "experiment", "card") |
 
 ## Inference cues

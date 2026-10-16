@@ -35,10 +35,10 @@ Service playbooks are entered from the router directly, independent of the spine
 
 ## 3. Apply the domain model
 
-Build the [domain model](domain-model.md) first: areas, their [facets](facets/README.md), evidence ladders, irreversible actions with exact commands, lead times, tools and vocabulary. Then, for each present facet:
+Build the [domain model](domain-model.md) first: areas, their [facets](facets/README.md), evidence ladders, irreversible actions with their command bindings, lead times, tools and vocabulary. Then, for each present facet:
 
 1. Apply its graph changes: rewrite the selected blueprints' steps and "Done when" with the area's real evidence, and add the playbooks the facet calls for, named in the user's terms (`sim-validation`, `backfill`, `playtest`, not `facet-playbook`).
-2. Collect its irreversible actions with their exact commands; rule 4 gates them and rule 6 guards them.
+2. Collect its irreversible actions with their command bindings; rule 4 gates them and rule 6 guards them.
 3. Collect its rails (checks, protected paths); rule 6 installs them.
 
 With several facets or areas, take the strictest gate defaults, the union of irreversible actions, and merge playbooks that do the same job. `physical-world` safety rules win over every other facet and over `autonomy`.
@@ -75,7 +75,7 @@ If `artifact_lifetime: disposable` for exploration, `decide` exits to a fresh `t
 
 ## 5. Set parameters
 
-Write these into each playbook's steps, using `toolchain` commands and `vocabulary` words.
+Write these into each playbook's steps, using `vocabulary` words and the toolchain's commands as bindings (`${test}`), whose values go in the project file.
 
 **Timeboxes** (exploration playbooks) by `uncertainty`:
 
@@ -124,6 +124,7 @@ The generated skill runs on `scripts/flow.mjs` (copied from this skill). The run
 
 **Per playbook**:
 
+- Every rails value is a binding: `checks: [${test}]`, `writes: [${code}]`, `irreversible: [${deploy}]`. The values are this repository's and go in `.flow/<skill>/project.md`; the skill stays reusable.
 - `checks`: the commands that prove "Done when" mechanically, from the toolchain and domain model (test suite, reconciliation query, benchmark with threshold, reference diff). Every kept-code work playbook gets them when `verification` is not `evidence`. Exits that handle failure get `on: fail`, the others `on: pass`, so a red check routes the run instead of being argued away.
 - `writes`: the paths the playbook may edit. Throwaway playbooks get their scratch path only; playbooks that must not touch datasets, raw inputs or generated contracts leave those out.
 - `irreversible`: the exact commands of its `[irreversible]` steps (a prefix of the command, or `/regex/`, matched where a command starts, not inside quoted text). The hooks block them everywhere else, and here until the human gate is approved. An irreversible step without a guarded command is a gap the validator reports.

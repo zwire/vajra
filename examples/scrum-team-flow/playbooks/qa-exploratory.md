@@ -25,9 +25,9 @@ Find defects in the release candidate that the scripted suite misses.
 ## Steps
 
 1. Write charters for the changed areas: "Explore ⟨area⟩ with ⟨data or role⟩ to discover ⟨risk⟩", ordered by impact × likelihood.
-2. Run independent charters in parallel on staging.
+2. Run independent charters in parallel on `${staging-url}`.
 3. Log observations and defects with reproduction steps and severity.
-4. File each defect in Jira with a proposed regression test.
+4. File each defect in Jira project `${tracker-project}` with a proposed regression test.
 
 ## Done when
 

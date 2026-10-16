@@ -5,8 +5,8 @@ phase: extract
 lifecycle: tracer
 kind: work
 checks:
-  - scripts/run-system-tests.sh --target simulator
-  - scripts/trace-check.py --require-results
+  - ${integration-tests}
+  - ${trace-check-results}
 exits:
   - to: release-gate
     when: every SRS id has a passing result or an accepted deviation
@@ -24,14 +24,14 @@ Verify the integrated software against every requirement.
 
 ## Steps
 
-1. Run `ctest --test-dir build` and the integration suite with `scripts/run-system-tests.sh --target simulator`.
-2. Run the system tests on the bench pump with `scripts/run-system-tests.sh --target bench`; collect results per SRS id.
+1. Run `${unit-tests}` and the integration suite on the pump simulator with `${integration-tests}`.
+2. Run the system tests on the bench pump with `${bench-tests}`; collect results per SRS id.
 3. Run the occlusion-detection timing and dose-accuracy checks the SRS names.
-4. Produce `build/verification-report.pdf`: SRS → test → result → evidence.
+4. Produce `${verification-report}`: SRS → test → result → evidence.
 
 ## Done when
 
-- `scripts/trace-check.py --require-results` shows a passing result or a recorded deviation with its risk assessment for every SRS id, and `build/verification-report.pdf` exists.
+- `${trace-check-results}` shows a passing result or a recorded deviation with its risk assessment for every SRS id, and `${verification-report}` exists.
 
 ## Reply with
 

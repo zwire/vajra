@@ -20,13 +20,13 @@ Show what was built against the sprint goal and collect the PO's verdict.
 ## Steps
 
 1. List each committed story against the Definition of Done, with evidence links.
-2. Demo each done story on `https://staging.example.com`: screenshots, recordings or API calls.
+2. Demo each done story on `${staging-url}`: screenshots, recordings or API calls.
 3. [human-gate] Wait for the PO to accept or return each story.
 4. File feedback and returned stories as backlog items.
 
 ## Done when
 
-- Each story in the `INV` sprint is marked accepted or returned with reasons, demo recordings are linked, and feedback is filed as new `INV` issues.
+- Each story in the `${tracker-project}` sprint is marked accepted or returned with reasons, demo recordings are linked, and feedback is filed as new `${tracker-project}` issues.
 
 ## Reply with
 

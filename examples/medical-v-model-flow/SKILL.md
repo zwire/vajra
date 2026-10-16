@@ -12,7 +12,9 @@ Read [principles.md](principles.md) once at the start of a task.
 
 ## How to run
 
-This workflow runs on rails. `flow` below means `node .agents/skills/medical-v-model-flow/scripts/flow.mjs`; it holds the state of the run and refuses moves the graph does not allow. Run `flow status` whenever you are unsure where you are.
+This workflow runs on rails. `flow` below means `node scripts/flow.mjs` from this skill's directory, run with the project root as the working directory; it holds the state of the run and refuses moves the graph does not allow. Run `flow status` whenever you are unsure where you are.
+
+A `${...}` in a playbook is a project binding: a command, path or other value this repository sets in `.flow/medical-v-model-flow/project.md`. `flow status` shows the values the active playbook uses. If `flow` says a binding is unbound, ask the user to fill it in; never guess a value.
 
 1. Match the request to one playbook below and run `flow start <playbook> --request "<one line>"`. Read the playbook file.
 2. Do its steps in order. After each, run `flow step <n> --evidence "<what shows it>"`, or `--skip "<reason>"`. Never drop a step silently.

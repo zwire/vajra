@@ -16,7 +16,7 @@ title: Spike
 phase: explore
 lifecycle: throwaway
 kind: work
-writes: [scratch/**]
+writes: [\${scratch}/**]
 exits:
   - to: ship
     when: the notes answer the question
@@ -28,11 +28,11 @@ Learn.
 
 ## Steps
 
-1. Try it in \`scratch/\`.
+1. Try it in \`\${scratch}/\`.
 
 ## Done when
 
-- \`scratch/NOTES.md\` holds the answer.
+- \`\${scratch}/NOTES.md\` holds the answer.
 `;
 
 const SHIP = `---
@@ -42,8 +42,8 @@ phase: any
 lifecycle: any
 kind: work
 checks:
-  - test -f ok.txt
-irreversible: [npm run deploy]
+  - \${ok-check}
+irreversible: [\${deploy}]
 exits:
   - to: end
     when: deployed
@@ -61,11 +61,27 @@ Deploy.
 
 1. Build with \`make\`.
 2. [human-gate] Confirm the deploy.
-3. [irreversible] Run \`npm run deploy\`.
+3. [irreversible] Run \`\${deploy}\`.
 
 ## Done when
 
-- \`npm run deploy\` printed the URL.
+- \`\${deploy}\` printed the URL.
+`;
+
+const BINDINGS = `---
+scratch: directory for throwaway work
+ok-check: command that proves the deploy is ready
+deploy: command that deploys
+rollout: command that rolls out in stages
+---
+`;
+
+const PROJECT = `---
+scratch: scratch
+ok-check: test -f ok.txt
+deploy: npm run deploy
+rollout: rollout
+---
 `;
 
 function project({ rails = "standard" } = {}) {
@@ -78,8 +94,11 @@ function project({ rails = "standard" } = {}) {
   fs.writeFileSync(path.join(skill, "SKILL.md"), "---\nname: demo-flow\ndescription: Demo. Only use when the user invokes demo-flow by name.\n---\n\nDrive runs with `scripts/flow.mjs`.\n\n[spike](playbooks/spike.md) [ship](playbooks/ship.md)\n");
   fs.writeFileSync(path.join(skill, "playbooks", "spike.md"), SPIKE);
   fs.writeFileSync(path.join(skill, "playbooks", "ship.md"), SHIP);
+  fs.writeFileSync(path.join(skill, "bindings.md"), BINDINGS);
+  fs.mkdirSync(path.join(proj, ".flow", "demo-flow"), { recursive: true });
+  fs.writeFileSync(path.join(proj, ".flow", "demo-flow", "project.md"), PROJECT);
   fs.writeFileSync(path.join(skill, "profile.md"), `---
-schema: 1
+schema: 2
 generator: vajra@test
 uncertainty: complex
 requirements: unknown
@@ -297,7 +316,7 @@ title: Ship
 phase: any
 lifecycle: any
 kind: work
-irreversible: [rollout]
+irreversible: [\${rollout}]
 exits:
   - to: end
     when: rolled out
@@ -310,9 +329,9 @@ Roll out in stages.
 ## Steps
 
 1. [human-gate] Approve the first stage.
-2. [irreversible] Run \`rollout --percent 1\`.
+2. [irreversible] Run \`\${rollout} --percent 1\`.
 3. [human-gate] Approve widening.
-4. [irreversible] Run \`rollout --percent 50\`.
+4. [irreversible] Run \`\${rollout} --percent 50\`.
 
 ## Done when
 
@@ -643,4 +662,78 @@ test("an invalid graph refuses to run but does not block the harness", () => {
   assert.match(p.cli("start", "spike", "--request", "x").stderr, /graph is invalid/);
   assert.equal(p.bash("npm run deploy").status, 0);
   assert.match(p.hook("session-start", {}).stdout, /rails are off until it validates/);
+});
+
+// ---------- bindings: one skill, many repositories ----------
+
+test("one skill copy runs in two projects with each project's own values", () => {
+  const p = project();
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "lg-other-"));
+  fs.mkdirSync(path.join(other, ".git"));
+  fs.mkdirSync(path.join(other, ".flow", "demo-flow"), { recursive: true });
+  fs.writeFileSync(path.join(other, ".flow", "demo-flow", "project.md"), "---\nscratch: [tmp, notebooks]\nok-check: test -f ready\ndeploy: make ship\nrollout: rollout\n---\n");
+  const flow = path.join(p.skill, "scripts", "flow.mjs");
+  const env = { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "" };
+  const cli = (...args) => spawnSync(process.execPath, [flow, ...args], { cwd: other, encoding: "utf8", env });
+  const hook = (input) => spawnSync(process.execPath, [flow, "hook", "pre-tool-use"], { cwd: other, encoding: "utf8", env, input: JSON.stringify({ cwd: other, ...input }) });
+  assert.equal(cli("start", "spike", "--request", "try it").status, 0);
+  assert.match(cli("status").stdout, /Try it in `tmp, notebooks\/`/);
+  assert.match(cli("status").stdout, /Bindings \(from \.flow\/demo-flow\/project\.md\): \$\{scratch\} = `tmp`, `notebooks`/);
+  assert.equal(hook({ tool_name: "Write", tool_input: { file_path: "notebooks/a.ipynb" } }).status, 0);
+  assert.match(hook({ tool_name: "Write", tool_input: { file_path: "scratch/a.js" } }).stderr, /may only write tmp\/\*\*, notebooks\/\*\*/);
+  // The other project's guard is its own command, not the first project's.
+  assert.equal(hook({ tool_name: "Bash", tool_input: { command: "npm run deploy" } }).status, 0);
+  assert.equal(hook({ tool_name: "Bash", tool_input: { command: "make ship" } }).status, 2);
+  // The first project, same skill files, keeps its own values.
+  p.cli("start", "spike", "--request", "try it");
+  assert.match(p.write("tmp/a.js").stderr, /may only write scratch\/\*\*/);
+});
+
+test("an unbound project cannot start a run, and says what to bind", () => {
+  const p = project();
+  fs.writeFileSync(path.join(p.proj, ".flow", "demo-flow", "project.md"), "---\nscratch: scratch\ndeploy: \"\"\n---\n");
+  const start = p.cli("start", "spike", "--request", "try it");
+  assert.equal(start.status, 1);
+  assert.match(start.stderr, /has not bound deploy, ok-check, rollout; ask the user to write them in \.flow\/demo-flow\/project\.md/);
+  const ctx = JSON.parse(p.hook("session-start", {}).stdout).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /has not bound deploy \(command that deploys\)/);
+});
+
+test("the project bindings are rails: the agent cannot change them unless the user suspends", () => {
+  const p = project();
+  const file = ".flow/demo-flow/project.md";
+  assert.match(p.write(file).stderr, /project bindings .* are part of the rails/);
+  assert.equal(p.bash(`echo 'deploy: true' >> ${file}`).status, 2);
+  assert.equal(p.bash(`cat ${file}`).status, 0);
+  p.cli("suspend");
+  assert.equal(p.write(file).status, 0);
+});
+
+test("install writes a project skeleton for the bindings and never overwrites it", () => {
+  const p = project();
+  const file = path.join(p.proj, ".flow", "demo-flow", "project.md");
+  fs.rmSync(file);
+  const out = p.cli("install", "--harness", "claude");
+  assert.match(out.stdout, /project: wrote \.flow\/demo-flow\/project\.md/);
+  const text = fs.readFileSync(file, "utf8");
+  assert.match(text, /# command that deploys\ndeploy: ""/);
+  assert.match(p.cli("start", "spike", "--request", "x").stderr, /has not bound/);
+  fs.writeFileSync(file, PROJECT);
+  assert.doesNotMatch(p.cli("install", "--harness", "claude").stdout, /project: wrote/);
+  assert.equal(fs.readFileSync(file, "utf8"), PROJECT);
+});
+
+test("while a guarded command's binding is unset, only reading commands run", () => {
+  const p = project();
+  fs.writeFileSync(path.join(p.proj, ".flow", "demo-flow", "project.md"), "---\nscratch: scratch\nok-check: test -f ok.txt\ndeploy: \"\"\nrollout: rollout\n---\n");
+  assert.match(p.bash("pnpm release").stderr, /use \$\{deploy\}, which \.flow\/demo-flow\/project\.md does not bind/);
+  assert.equal(p.bash("make build").status, 2);
+  assert.equal(p.bash("cat README.md | grep x").status, 0);
+  assert.equal(p.bash("git status").status, 0);
+  assert.equal(p.bash("ls > out.txt").status, 2);
+  assert.equal(p.bash(`node ${path.join(p.skill, "scripts", "flow.mjs")} status`).status, 0);
+  // Edits are not guarded commands; under standard rails they stay free without a run.
+  assert.equal(p.write("src/app.js").status, 0);
+  p.cli("suspend");
+  assert.equal(p.bash("make build").status, 0);
 });

@@ -24,7 +24,7 @@ Turn the sprint's experience into structural change, including changes to this w
 
 ## Done when
 
-- Action items are in Jira, and this skill is updated or explicitly kept as is.
+- Action items are in Jira project `${tracker-project}`, and this skill is updated or explicitly kept as is.
 
 ## Reply with
 

@@ -40,7 +40,7 @@ flowchart TD
   investigation -->|"the answer reveals a ranking idea worth testing"| frame_hypothesis
   offline_experiment -->|"NDCG@10 over three seeds is recorded against…"| decide
   offline_experiment -->|"the result shows the hypothesis was wrong"| frame_hypothesis
-  offline_experiment -->|"the gain is clearly below 0.003 and the user…"| end_
+  offline_experiment -->|"the gain is clearly below ${min-gain} and the…"| end_
   retro -->|"changes are recorded and the workflow is…"| end_
   shadow_validation -->|"24 hours of shadow traffic stayed within the…"| ab_ramp
   shadow_validation -->|"latency or errors broke the budget"| implement_ranker

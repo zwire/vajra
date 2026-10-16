@@ -23,14 +23,14 @@ Promotion gate from throwaway to tracer: decide whether an offline win is worth 
 ## Steps
 
 1. Summarize `RESULTS.md`: gain, spread, segment breakdown, biggest losers.
-2. Check the gain is at least 0.003 and larger than the spread, and that no segment loses more than 0.005.
+2. Check the gain is at least `${min-gain}` and larger than the spread, and that no segment loses more than `${max-segment-loss}`.
 3. Estimate the serving cost: new features to compute online and their latency.
 4. [human-gate] Present go, explore further, or no-go with a recommendation, and wait for the verdict.
-5. On go, write `docs/decisions/<date>-<name>.md`: result, decision, serving cost, shortcuts in the experiment not to carry over.
+5. On go, write `${decisions}/<date>-<name>.md`: result, decision, serving cost, shortcuts in the experiment not to carry over.
 
 ## Done when
 
-- The verdict is recorded; on go, `docs/decisions/<date>-<name>.md` exists with the numbers it was based on.
+- The verdict is recorded; on go, `${decisions}/<date>-<name>.md` exists with the numbers it was based on.
 
 ## Reply with
 

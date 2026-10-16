@@ -4,7 +4,7 @@ description: Meta skill creator that turns a developer's stated way of working a
 license: MIT
 compatibility: Requires Node.js 18+ for scripts/validate.mjs and scripts/flow.mjs. Works with any agent that loads Agent Skills.
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # vajra
@@ -21,6 +21,8 @@ A generated skill is a **workflow graph**:
 - **The router** matches an incoming request to an entry playbook.
 
 Two inputs shape it: the **development style** (how uncertain the work is, how it is paced, what failure costs) decides the topology; the **domain model**, built for this user at the resolution their work needs, decides what each playbook's work and evidence actually are.
+
+The output is **reusable**: it names no repository. Commands, paths, URLs and every other value that differs between repositories are **bindings** (`${name}`), declared in the skill's `bindings.md` and given values per project in `.flow/<skill>/project.md`. The same skill can be copied into any project of the same kind; only the project file changes.
 
 The output runs **on rails**: every generated skill carries `scripts/flow.mjs`, a runtime that tracks the current playbook, refuses moves the graph does not allow, runs each playbook's checks, and interrupts at human gates until the human resumes it. It depends on no particular agent: it is a CLI, an MCP server, and a lifecycle hook for any agent that supports hooks.
 
@@ -41,10 +43,11 @@ When unclear, default to **Generate** if no generated skill exists in the projec
 2. **Infer first, then grill.** Infer what you can from the user's words, the repository and the toolchain. Then question the user one question at a time, each with a recommendation, until every graph-changing decision is settled or the user says to proceed.
 3. **Gates where mistakes are expensive.** Put human gates in front of irreversible actions and promotion gates between lifecycles. Do not put gates anywhere else.
 4. **Topology follows the shape of the work.** Fan out only when the work splits into independent parts; keep sequential work sequential.
-5. **Fit the domain, never stop at the general case.** Build the domain model from the repository and the interview; use the facets as a checklist, not a template. Every step and "Done when" names the real commands, tools, metrics and artifacts of this domain. Physical safety rules win.
-6. **Rails over reminders.** Anything the graph depends on (exits, human gates, checks, irreversible commands, write limits) goes into frontmatter the runtime enforces, not only into prose.
-7. **Validate before handing over.** Run `scripts/validate.mjs` on the generated skill and fix every error. Never hand over a skill that fails validation.
-8. **Write for the agent that will run it.** Generated files are operational instructions in English: imperative, concrete, no filler.
+5. **Fit the domain, never stop at the general case.** Build the domain model from the repository and the interview; use the facets as a checklist, not a template. Every step and "Done when" names the real tools, metrics and artifacts of this domain, and the real commands and paths through bindings. Physical safety rules win.
+6. **Reusable, never tied to one repository.** The skill holds the way of working and the domain; the project file holds this repository's values. No path, command, URL, branch name, project key or service threshold is written into the skill: write `${name}`, declare it in `bindings.md`, and put the value in `.flow/<skill>/project.md`. The validator rejects literal rails values and warns on repository paths in prose.
+7. **Rails over reminders.** Anything the graph depends on (exits, human gates, checks, irreversible commands, write limits) goes into frontmatter the runtime enforces, not only into prose.
+8. **Validate before handing over.** Run `scripts/validate.mjs` on the generated skill (with `--project` for the project it was made in) and fix every error. Never hand over a skill that fails validation.
+9. **Write for the agent that will run it.** Generated files are operational instructions in English: imperative, concrete, no filler.
 
 ## Reference map
 
@@ -58,10 +61,10 @@ Read only what the current step needs.
 | [references/domain-model.md](references/domain-model.md) | Building the domain model at the right resolution; specificity rules against generic output |
 | [references/facets/](references/facets/README.md) | Cross-cutting domain traits (measured outcome, perceptual output, data dependence, stand-in ladder, physical world, shared contracts, data mutation, external release, resource budgets, reproducibility) |
 | [references/gates-and-lifecycles.md](references/gates-and-lifecycles.md) | Lifecycle labels, promotion gates, the discipline ratchet, human gates |
-| [references/graph-model.md](references/graph-model.md) | Node and edge semantics, topology rules, the playbook and profile frontmatter contracts the validator enforces, schema versions and migrations |
+| [references/graph-model.md](references/graph-model.md) | Node and edge semantics, topology rules, the playbook, profile and bindings contracts the validator enforces, schema versions and migrations |
 | [references/authoring.md](references/authoring.md) | How to write the generated router and playbooks so agents follow them |
-| [templates/](templates/) | `router.md`, `playbook.md`, `principles.md`, `profile.md` skeletons |
-| [scripts/validate.mjs](scripts/validate.mjs) | Validator and graph renderer: `node scripts/validate.mjs <skill-dir> --write-graph` |
+| [templates/](templates/) | `router.md`, `playbook.md`, `principles.md`, `profile.md`, `bindings.md` skeletons, and `project.md` for the project's values |
+| [scripts/validate.mjs](scripts/validate.mjs) | Validator and graph renderer: `node scripts/validate.mjs <skill-dir> [--project <root>] --write-graph` |
 | [scripts/flow.mjs](scripts/flow.mjs) | Runtime copied into every generated skill: run state, transitions, checks; CLI, MCP server and lifecycle hooks |
 | [references/rails.md](references/rails.md) | What the runtime enforces, the standards it follows, how to install it per agent, and the limits of enforcement |
 | [references/calibration.md](references/calibration.md) | Worked excerpts showing how concrete a domain model, a playbook and its rails should be |

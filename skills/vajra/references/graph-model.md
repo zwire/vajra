@@ -50,16 +50,16 @@ exits:
 ---
 ```
 
-Rails fields, all optional (see [rails.md](rails.md)):
+Rails fields, all optional (see [rails.md](rails.md)). Their values differ per repository, so every entry names a [binding](#bindings):
 
 ```yaml
 checks:                        # commands that must exit 0 for the run to take pass exits
-  - pnpm test
-  - pnpm typecheck
-writes: [scratch/**]           # paths the playbook may edit (globs from the project root)
+  - ${test}
+  - ${typecheck}
+writes: [${scratch}/**]        # paths the playbook may edit (globs from the project root)
 irreversible:                  # commands of its [irreversible] steps; blocked elsewhere and before its human gate
-  - npm run deploy
-  - /ros2 launch \S+ real\.launch\.py/
+  - ${deploy}
+  - /ros2 launch \S+ ${real-launch}/
 exits:
   - to: ship
     when: the checks are green
@@ -78,14 +78,40 @@ Step tags the validator understands:
 - `[irreversible]`: the step cannot be undone. Requires an earlier (or the same) step tagged `[human-gate]` in the same playbook.
 - `[human-gate]`: stop and wait for the user.
 
+## Bindings
+
+A generated skill is reusable: it names no repository. Every value that changes from one repository to the next (a command, a path or glob, a URL, a branch name, a tracker key, a dashboard, a threshold of one service) is a binding, written `${name}` wherever it is needed: rails fields, steps, "Done when", the router, the principles and the profile. Names are lowercase letters, digits, `-` and `_`, starting with a letter.
+
+The skill declares its bindings in `bindings.md`, one line each, saying what the project must supply:
+
+```yaml
+---
+test: command that runs the unit tests and exits non-zero on failure
+code: globs of the source and test files the build playbooks may edit
+deploy: command that deploys to production
+---
+```
+
+Each project gives the values in `.flow/<skill>/project.md`, a string or a list; its body holds the repository facts (toolchain, where data and artifacts live) that used to sit in the profile:
+
+```yaml
+---
+test: pnpm test
+code: [src/**, test/**]
+deploy: pnpm release
+---
+```
+
+The runtime fills the values in before it runs checks, matches guarded commands or limits edits. A list expands an entry into one entry per value (`${code}/**` with two values gives two globs); inside a `/regex/` pattern each value is escaped and a list becomes an alternation; in prose a list reads as `a, b`. Until every binding has a value, `flow start` refuses and the injected context names the missing ones. The project file is part of the rails: the agent changes it only while the human has run `flow suspend`. `flow install` writes a skeleton with each binding's description when the file is missing.
+
 ## Profile frontmatter
 
 `profile.md` keeps the axis values in its frontmatter so the validator, Evolve and evals can read them. The table in the body records the source of each value.
 
 ```yaml
 ---
-schema: 1                          # file contract version (see Schema versions)
-generator: vajra@0.2.0   # from: node scripts/validate.mjs --version
+schema: 2                          # file contract version (see Schema versions)
+generator: vajra@0.3.0   # from: node scripts/validate.mjs --version
 uncertainty: complex
 requirements: unknown
 journey: [explore, expand, extract]
@@ -113,6 +139,7 @@ Allowed values are the ones in [style-profile.md](style-profile.md#axes); `domai
 | Schema | Introduced in | Migration from the previous schema |
 |---|---|---|
 | 1 | 0.2.0 | Add `promotes: from->to` to every gate that raises a lifecycle. Move the profile axes into `profile.md` frontmatter with `schema: 1` and `generator`. Replace domain packs with `facets` and a `## Domain model` section. Add `rails`, and `checks`, `writes`, `irreversible` and exit `on` where the profile calls for them. Copy `scripts/flow.mjs` and `scripts/validate.mjs` into the skill and drive runs through them from the router. |
+| 2 | 0.3.0 | Make the skill reusable. For every repository-specific value (paths, globs, commands, scripts, URLs, branch names, tracker keys, dashboards, thresholds of one service) in playbooks, the router, the principles and the profile, write `${name}`, declare `name` with a description in a new `bindings.md`, and put the value in `.flow/<skill>/project.md`. Move the profile's `## Toolchain` table and other repository facts into the project file's body. Replace the hard-coded `flow.mjs` path in the router's "How to run" with the text from [../templates/router.md](../templates/router.md). |
 
 ## Validator checks
 
@@ -122,7 +149,9 @@ Errors (must fix):
 - Frontmatter uses only the supported YAML subset.
 - Each playbook has the frontmatter contract, non-empty required sections, at least one numbered step, and valid enum values.
 - `promotes` appears only on gates, has the form `from->to`, and raises the lifecycle.
-- `checks`, `writes` and `irreversible` are lists of strings; `irreversible` appears only on playbooks with `[irreversible]` steps and its `/regex/` patterns compile; exit `on` is `pass` or `fail` and needs `checks`.
+- `checks`, `writes` and `irreversible` are lists of strings, and every entry names a binding; `irreversible` appears only on playbooks with `[irreversible]` steps and its `/regex/` patterns compile; exit `on` is `pass` or `fail` and needs `checks`.
+- Every `${name}` used anywhere in the skill is declared in `bindings.md`, with a description; names are lowercase.
+- With `--project <root>` (or the project file itself): the project file exists and gives a value for every declared binding.
 - Every non-terminal playbook has at least one exit; every exit has `to` and `when`; every `to` exists or is `end`.
 - Every playbook linked from `SKILL.md` exists; every playbook is reachable from the router.
 - Every playbook can reach an end (no trap cycles).
@@ -132,6 +161,8 @@ Errors (must fix):
 - No `[irreversible]` step without a preceding `[human-gate]`.
 
 Warnings (justify or fix): router over 500 lines, playbook over 12 steps, more than 15 playbooks, multiple lifecycles but no promotion gate, a gate that neither promotes nor stops at a human gate, an unusual phase and lifecycle pair, unknown frontmatter keys, `profile.md` missing.
+
+Portability warnings: text in `SKILL.md`, `principles.md`, `profile.md` or a playbook that looks like it belongs to one repository (`./x`, `../x`, `~/x`, `/x`, `dir/`, `a/b.ext`, globs, `http(s)://` URLs), unless it is a file inside the skill or under `.flow/`; a declared binding no file uses; a project value the skill does not declare.
 
 Domain-fit warnings: a work or gate playbook whose "Done when", or all of whose steps, name nothing concrete (no command, path, metric or link); a profile without a `## Domain model`.
 

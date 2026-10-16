@@ -4,7 +4,7 @@ Apply these throughout. When a principle changes a decision, name it in your rep
 
 ## Trace everything
 
-Every requirement, design element, test and result carries ids that link to each other in `docs/trace.csv`. Applies to every playbook that creates or changes one of them.
+Every requirement, design element, test and result carries ids that link to each other in the trace matrix `${trace-matrix}`. Applies to every playbook that creates or changes one of them.
 
 ## Prove it works
 

@@ -6,13 +6,15 @@ compatibility: Requires Node.js 18+ for scripts/flow.mjs.
 
 # search-ranking-flow
 
-Test ranking ideas cheaply offline against a frozen judgment set, rebuild only the winners in `ranker/` and `serving/`, prove them on shadow traffic within the latency budget, and let the A/B ramp decide. The held-out week is evaluated once, at the ramp gate, and every ramp stage waits for the product owner.
+Test ranking ideas cheaply offline against a frozen judgment set, rebuild only the winners in `${ranker-dir}` and `${serving-dir}`, prove them on shadow traffic within the latency budget, and let the A/B ramp decide. The held-out week is evaluated once, at the ramp gate, and every ramp stage waits for the product owner.
 
 Read [principles.md](principles.md) once at the start of a task.
 
 ## How to run
 
-This workflow runs on rails. `flow` below means `node .agents/skills/search-ranking-flow/scripts/flow.mjs`; it holds the state of the run and refuses moves the graph does not allow. Run `flow status` whenever you are unsure where you are.
+This workflow runs on rails. `flow` below means `node scripts/flow.mjs` from this skill's directory, run with the project root as the working directory; it holds the state of the run and refuses moves the graph does not allow. Run `flow status` whenever you are unsure where you are.
+
+A `${...}` in a playbook is a project binding: a command, path or other value this repository sets in `.flow/search-ranking-flow/project.md`. `flow status` shows the values the active playbook uses. If `flow` says a binding is unbound, ask the user to fill it in; never guess a value.
 
 1. Match the request to one playbook below and run `flow start <playbook> --request "<one line>"`. Read the playbook file.
 2. Do its steps in order. After each, run `flow step <n> --evidence "<what shows it>"`, or `--skip "<reason>"`. Never drop a step silently.
@@ -42,8 +44,8 @@ This workflow runs on rails. `flow` below means `node .agents/skills/search-rank
 
 | Lifecycle | Means | Leaves through |
 |---|---|---|
-| throwaway | Offline experiments in `experiments/` | [decide](playbooks/decide.md) |
-| tracer | Built in `ranker/` and `serving/`, shadow traffic only | [ab-ramp](playbooks/ab-ramp.md) |
+| throwaway | Offline experiments in `${experiments-dir}` | [decide](playbooks/decide.md) |
+| tracer | Built in `${ranker-dir}` and `${serving-dir}`, shadow traffic only | [ab-ramp](playbooks/ab-ramp.md) |
 | hardened | Serving real users | - |
 
 See [graph.md](graph.md) for the full workflow graph and [profile.md](profile.md) for the choices behind it.

@@ -372,3 +372,68 @@ test("a missing runtime is a warning", () => {
   const r = validateSkill(makeSkill("ok-flow", { routes: ["a"], playbooks: [{ id: "a" }] }));
   assert.ok(hasWarning(r, /runtime missing/));
 });
+
+// ---------- bindings: a skill names repository-specific values only through bindings ----------
+
+const withBindings = (dir, text) => { fs.writeFileSync(path.join(dir, "bindings.md"), text); return dir; };
+
+test("rails entries must use bindings; literals are errors", () => {
+  const dir = withBindings(makeSkill("x-flow", {
+    routes: ["a", "b"],
+    playbooks: [
+      { id: "a", extra: "checks:\n  - npm test\nwrites: [src/**]\n" },
+      { id: "b", extra: "checks:\n  - ${test}\nwrites: [${code}/**, ${docs}]\nirreversible: [${deploy}]\n", steps: ["[human-gate] Ask.", "[irreversible] Run `${deploy}`."] },
+    ],
+  }), "---\ntest: command that runs the tests\ncode: source directories\ndocs: documentation globs\ndeploy: command that deploys\n---\n");
+  const r = validateSkill(dir);
+  assert.ok(hasError(r, /a\.md: `checks` entry `npm test` is a literal/));
+  assert.ok(hasError(r, /a\.md: `writes` entry `src\/\*\*` is a literal/));
+  assert.ok(!hasError(r, /b\.md/), r.errors.join("\n"));
+  assert.ok(!hasWarning(r, /b\.md: irreversible pattern/), "a binding in a pattern matches the same binding in the step");
+});
+
+test("bindings must be declared with a description, and declared ones used", () => {
+  const dir = withBindings(makeSkill("x-flow", {
+    routes: ["a"],
+    playbooks: [{ id: "a", extra: "checks:\n  - ${test}\n", steps: ["Run `${lint}`."] }],
+  }), "---\ntest: command that runs the tests\nunused: something\nBad: x\nempty: \"\"\n---\n");
+  const r = validateSkill(dir);
+  assert.ok(hasError(r, /a\.md: binding `\$\{lint\}` is not declared in bindings\.md/));
+  assert.ok(hasError(r, /bindings\.md: binding name "Bad"/));
+  assert.ok(hasError(r, /bindings\.md: `empty` needs a one-line description/));
+  assert.ok(hasWarning(r, /bindings\.md: `unused` is declared but no file uses/));
+  assert.ok(!hasError(r, /`test`/));
+});
+
+test("repository-specific paths and URLs in prose are warnings; skill files, .flow/ and bindings are not", () => {
+  const dir = withBindings(makeSkill("x-flow", {
+    routes: ["a"],
+    playbooks: [{
+      id: "a",
+      steps: ["Edit `db/migrations/` and `api/openapi.yaml`, run `./tools/check.sh`.", "Open https://staging.example.com and check `/healthz`.", "Read [the router](../SKILL.md), `.flow/x-flow/log.jsonl`, `${data}/train.csv`, pass/fail."],
+    }],
+    description: "Use from ~/work/acme.",
+  }), "---\ndata: dataset directory\n---\n");
+  const r = validateSkill(dir);
+  const w = r.warnings.find((x) => x.startsWith("playbooks/a.md")) || "";
+  for (const hit of ["db/migrations/", "api/openapi.yaml", "./tools/check.sh", "https://staging.example.com", "/healthz"]) assert.ok(w.includes(`\`${hit}\``), hit);
+  for (const fine of ["SKILL.md", ".flow/", "train.csv", "pass/fail"]) assert.ok(!w.includes(fine), fine);
+  assert.ok(hasWarning(r, /SKILL\.md: `~\/work\/acme` looks repository-specific/));
+});
+
+test("--project checks that the project binds every name", () => {
+  const dir = withBindings(makeSkill("bind-flow", { routes: ["a"], playbooks: [{ id: "a", extra: "checks:\n  - ${test}\n  - ${lint}\n" }] }), "---\ntest: tests\nlint: linter\n---\n");
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "lg-proj-"));
+  assert.ok(hasError(validateSkill(dir, { project: proj }), /project\.md: missing; bind test, lint there/));
+  fs.mkdirSync(path.join(proj, ".flow", "bind-flow"), { recursive: true });
+  fs.writeFileSync(path.join(proj, ".flow", "bind-flow", "project.md"), "---\ntest: pnpm test\nlint: \"\"\nextra: x\n---\n");
+  let r = validateSkill(dir, { project: proj });
+  assert.ok(hasError(r, /no value for `lint`/));
+  assert.ok(hasWarning(r, /`extra` is not declared/));
+  fs.writeFileSync(path.join(proj, ".flow", "bind-flow", "project.md"), "---\ntest: pnpm test\nlint: [pnpm lint, pnpm typecheck]\n---\n");
+  r = validateSkill(dir, { project: proj });
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.project.values, { test: ["pnpm test"], lint: ["pnpm lint", "pnpm typecheck"] });
+  const run = spawnSync(process.execPath, [validator, "--project", proj, dir], { encoding: "utf8" });
+  assert.equal(run.status, 0, run.stdout);
+});

@@ -29,7 +29,7 @@ flowchart TD
   api_change -->|"another committed story is not done yet"| increment
   api_change -->|"every committed story is done or returned to…"| sprint_review
   bug_fix -->|"the fix is for a blocked release candidate and…"| release_gate
-  bug_fix -->|"the fix is merged to main and verified"| end_
+  bug_fix -->|"the fix is merged to the default branch and…"| end_
   increment -->|"the story changes the public REST API"| api_change
   increment -->|"another committed story is not done yet"| increment
   increment -->|"every committed story is done or returned to…"| sprint_review

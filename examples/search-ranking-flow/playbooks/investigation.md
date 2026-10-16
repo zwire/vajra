@@ -19,7 +19,7 @@ Answer a read-only question about click logs, experiments, dashboards or code.
 ## Steps
 
 1. Restate the question and what a useful answer looks like.
-2. Read the relevant logs, `experiments/`, `docs/decisions/` and code; run only read-only queries.
+2. Read the relevant logs, `${experiments-dir}`, `${decisions}` and code; run only read-only queries.
 3. Answer with references (file:line, query text, dashboard panel). Mark inferences as inferences.
 
 ## Done when
