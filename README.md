@@ -22,11 +22,25 @@ A meta skill for AI coding agents. Describe how you work and what you build. It 
 
 ---
 
-| When | You run | What happens |
-|---|---|---|
-| Once | `/vajra` and a few sentences | It infers your style and domain, grills you in quick rounds of choices, then composes, validates and dry-runs your skill |
-| Every task | `/your-flow <task>` | The router picks a playbook; the agent works through its steps, checks and exits, and stops at each human gate |
-| Every tool call | nothing: the hooks fire | `flow.mjs` keeps the run state and refuses illegal moves; the hooks block what the graph forbids |
+```mermaid
+flowchart LR
+  you(["“Offline experiments, then shadow traffic,<br/>then an A/B ramp. Revenue is on the line.”"])
+  subgraph gen ["/vajra · once"]
+    g1["Profile, domain model,<br/>grill in rounds of choices"] --> g2{{"Compose, validate<br/>and dry-run"}}
+  end
+  subgraph flow ["/your-flow · every task"]
+    f1["Router → playbook:<br/>steps, checks, exits"] --> f2{{"Human gate<br/>before the irreversible"}}
+  end
+  subgraph rails ["Rails · every tool call"]
+    r1["flow.mjs: run state, legal moves<br/>Hooks: block, guard, inject"]
+  end
+  you --> gen --> flow
+  flow <--> rails
+  classDef gate fill:#ede9fe,stroke:#6d28d9,color:#000
+  classDef rail fill:#fee2e2,stroke:#b91c1c,color:#000
+  class g2,f2 gate
+  class r1 rail
+```
 
 ## Quick start
 
@@ -129,6 +143,27 @@ The skill format follows the Agent Skills specification exactly: `SKILL.md` fron
 
 Graph engineering, as agent frameworks practice it, is a state machine. Code owns the transitions between states, and the model works inside each state. State is checkpointed, and the run is interrupted for a human, then resumed. vajra builds that model on files and on interfaces every coding agent already has. The agent drives the run through `flow.mjs`; the hooks see every shell and edit call, and let through only what the run allows.
 
+```mermaid
+flowchart LR
+  you(["You"])
+  M["Any coding agent"]
+  subgraph rails ["Rails"]
+    F["flow.mjs<br/>CLI runtime"]
+    K{{"Lifecycle hooks<br/>JSON deny = blocked"}}
+  end
+  S[(".flow/your-flow/<br/>state + log")]
+  X["Your repo<br/>commands and files"]
+  M -- "start · step · finish · exit" --> F
+  M -- "shell and edit calls" --> K
+  you -- "approve / reject" --> K
+  K -- "only if allowed" --> X
+  F <-- "checkpoint" --> S
+  K -. "reads" .-> S
+  classDef rail fill:#fee2e2,stroke:#b91c1c,color:#000
+  class F,K rail
+  style rails fill:#fff7f7,stroke:#b91c1c
+```
+
 | Concept | In agent graph frameworks | In a generated skill |
 |---|---|---|
 | Node / edge | Function or sub-agent / transition | Playbook / exit |
@@ -143,7 +178,27 @@ Graph engineering, as agent frameworks practice it, is a state machine. Code own
 | Enforcement | Lifecycle hooks (JSON on stdin, a JSON deny blocks) | Blocks and context injection that work whether or not the agent cooperates |
 | Optional | MCP elicitation | A gate dialog the model cannot answer, for clients that support it (off by default: MCP tools cost context every session) |
 
-A gated rollout in the example `search-ranking-flow`, as the runtime and hooks print it. The agent never decides on its own that the ramp may widen (`flow` stands for `node .agents/skills/search-ranking-flow/scripts/flow.mjs`):
+A gated rollout in the example `search-ranking-flow`. The agent never decides on its own that the ramp may widen:
+
+```mermaid
+sequenceDiagram
+  actor You
+  participant A as Agent
+  participant K as Hooks + flow.mjs
+  A->>K: abctl ramp --percent 1
+  K--xA: Blocked: step 2 [human-gate] not approved
+  A->>You: Evidence so far. Approve the 1% stage?
+  You->>K: approve
+  A->>K: abctl ramp --percent 1
+  K-->>A: allowed
+  A->>K: abctl ramp --percent 50
+  K--xA: Blocked: step 6 [human-gate] not approved
+```
+
+<details>
+<summary>The same exchange as the runtime prints it</summary>
+
+`flow` stands for `node .agents/skills/search-ranking-flow/scripts/flow.mjs`.
 
 ```console
 $ flow start ab-ramp --request "ramp model 0412"
@@ -161,6 +216,8 @@ $ flow step 3 --evidence "..."; flow step 4 --evidence "1% started"
 $ (agent) abctl ramp search-ranker-0412 --percent 50
 [search-ranking-flow] Blocked: `abctl ramp` belongs to step 7 and step 6 [human-gate] is not approved. Run `flow step 6`, then stop and ask the user.
 ```
+
+</details>
 
 | Enforced | How |
 |---|---|
@@ -198,25 +255,47 @@ The [rails reference](skills/vajra/references/rails.md) spells out what is enfor
 | *"Two-week sprints, QA sign-off. B2B invoicing; customers' ERPs call our API."* | Sprint spine, expand-then-contract API changes with an OpenAPI breaking-change check, and a **QA release gate** with a migration dry run. Triggers automatically. [Graph](examples/scrum-team-flow/graph.md) |
 | *"Infusion pump software, IEC 62304 class B. Traceability, named approver."* | V-model with trace checks that route pass and fail, guarded baseline and release commands, and strict rails: no edit without an active playbook. [Graph](examples/medical-v-model-flow/graph.md) |
 
-The first one, simplified (purple: gates):
+The first one, simplified:
 
 ```mermaid
 flowchart LR
-  frame["Frame<br/>hypothesis"] --> exp["Offline<br/>experiment"] --> decide{{"Decide"}} --> impl["Implement<br/>ranker"] --> shadow["Shadow<br/>validation"] --> ramp{{"A/B ramp"}}
-  shadow -. "on fail" .-> impl
+  subgraph explore ["throwaway · experiments only"]
+    direction TB
+    frame["Frame hypothesis"] --> exp["Offline experiment<br/>NDCG@10 × 3 seeds"]
+  end
+  subgraph build ["tracer · ranker and serving"]
+    direction TB
+    impl["Implement ranker<br/>checks: tests · NDCG · p99"] --> shadow["Shadow validation<br/>24 h, p99 ≤ 40 ms"]
+    shadow -- "on fail" --> impl
+  end
+  explore --> decide{{"Decide<br/>throwaway → tracer"}}
+  decide -- "go: rebuild,<br/>don't copy" --> build
+  build -- "on pass" --> ramp{{"A/B ramp<br/>tracer → hardened<br/>gates at 1% and 50%"}}
   classDef gate fill:#ede9fe,stroke:#6d28d9,color:#000
   class decide,ramp gate
+  style explore fill:#fef3c7,stroke:#b45309
+  style build fill:#dbeafe,stroke:#1d4ed8
 ```
-
-Frame and experiment are `throwaway` and write only under the experiments folder. Decide promotes to `tracer`, and the ranker is rebuilt rather than copied. Implement's checks run the tests, the NDCG gain and the p99 latency budget; shadow validation's check routes a broken budget back to implement. The ramp promotes to `hardened`, with a human gate before the 1% stage and another before widening to 50%.
 
 ## How it works
 
-1. **Infer.** From your words, the repository and its toolchain, vajra drafts a style profile (spine, journey, failure cost, cadence, team, rails level and more) and a domain model (areas × [facets](skills/vajra/references/facets/README.md)).
-2. **Grill.** It asks short rounds of choices, each pre-set to a recommendation, until every decision that changes the graph is settled.
-3. **Compose.** It picks the spine, adds service playbooks and gates, lays the rails, and prunes everything the profile does not justify.
-4. **Validate and dry-run.** The validator checks the graph, the rails and the domain fit; errors and generic steps send it back to compose. Then it walks one realistic request through `flow.mjs` in a throwaway state directory.
-5. **Install.** With your yes, it installs the hooks for the agents you use.
+```mermaid
+flowchart LR
+  subgraph model ["A model of you"]
+    direction TB
+    D["Your words,<br/>repo and toolchain"] --> P["Style profile<br/>domain model: areas × facets"]
+    G["Grill: short rounds of choices,<br/>pre-set to a recommendation"] <--> P
+  end
+  subgraph build ["Build"]
+    direction TB
+    C["Compose<br/>spine · services · gates · rails · prune"] --> V{{"Validate<br/>graph · rails · domain fit"}}
+    V -- "errors, generic steps" --> C
+  end
+  model --> build
+  build -- "OK" --> DR["Dry-run<br/>on flow.mjs"] --> I["Install hooks"] --> S(["your-flow/"])
+  classDef gate fill:#ede9fe,stroke:#6d28d9,color:#000
+  class V gate
+```
 
 **Development style decides the topology.**
 
@@ -225,7 +304,25 @@ Frame and experiment are `throwaway` and write only under the experiments folder
 - Failure cost decides gate strictness, review depth and the rails level.
 - Cadence, team size, verification posture, autonomy and parallelism tune each playbook.
 
-Work moves through three lifecycles, `throwaway` → `tracer` → `hardened`, and only a gate that declares the raise moves it up. A spike's code is rebuilt, not promoted. When a hardened system meets a genuinely new unknown, that sub-problem is explored on its own and re-enters through the decide gate; hardened code is never relabeled.
+Work moves between three lifecycles, and only gates move it up:
+
+```mermaid
+stateDiagram-v2
+  direction LR
+  [*] --> throwaway: an idea
+  throwaway --> tracer: decide gate, rebuild instead of copy
+  tracer --> hardened: promotion gate, checklist and a human
+  throwaway --> [*]: no-go
+  hardened --> throwaway: a new unknown, explored as a sub-problem
+  classDef throwaway fill:#fef3c7,stroke:#b45309,color:#000
+  classDef tracer fill:#dbeafe,stroke:#1d4ed8,color:#000
+  classDef hardened fill:#bbf7d0,stroke:#15803d,color:#000
+  class throwaway throwaway
+  class tracer tracer
+  class hardened hardened
+```
+
+Throwaway playbooks may edit only their scratch paths, and the hooks guard the deploys of hardened work. A sub-problem explored from hardened work re-enters through the decide gate; hardened code is never relabeled.
 
 **The domain model decides the work.** It is built for you, not picked from a list. Areas are split only as finely as the graph needs: perception and motion on a robot, the ranking model and the serving path in search. Each area gets its [facets](skills/vajra/references/facets/README.md), an evidence ladder from cheapest to real, the irreversible actions with their commands, lead times and vocabulary. Each facet says where those facts must show up: which evidence, which gates, which guarded commands. The facts themselves come from your repository and your answers. Physical safety rules always win.
 
