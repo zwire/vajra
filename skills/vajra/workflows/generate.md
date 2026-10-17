@@ -80,8 +80,8 @@ Follow [../references/authoring.md](../references/authoring.md). Produce:
 ├── bindings.md       # every repository-specific value the skill needs, by name, with what it must be
 ├── scripts/
 │   ├── flow.mjs      # copied unchanged from this skill's scripts/
-│   ├── guard.mjs     # copied unchanged from this skill's scripts/
-│   └── validate.mjs  # copied unchanged from this skill's scripts/
+│   ├── validate.mjs  # copied unchanged from this skill's scripts/
+│   └── lib/          # copied unchanged from this skill's scripts/lib/
 └── playbooks/
     └── <id>.md       # one per node, from templates/playbook.md
 

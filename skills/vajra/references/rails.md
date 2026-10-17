@@ -29,7 +29,7 @@ The interfaces are standards current coding agents share:
 | Layer | When | Enforces |
 |---|---|---|
 | Validator (`validate.mjs`) | Generation and Evolve | The graph itself: exits exist, no trap cycles, lifecycles rise only through gates that declare it, irreversible steps sit behind human gates |
-| Runtime (`flow.mjs`, with its hook checks in `guard.mjs`) | Every run | The agent's moves: one active playbook, steps recorded with evidence, human gates passed only by the human, checks run before exits open, only declared exits taken |
+| Runtime (`flow.mjs`, with the rest in `lib/`) | Every run | The agent's moves: one active playbook, steps recorded with evidence, human gates passed only by the human, checks run before exits open, only declared exits taken |
 | Hooks | Every tool call, prompt and stop | Work outside the runtime: guarded commands blocked until their gate is approved, edits limited to the active playbook's paths, approvals only from the human's own message, state protected, run state injected into context |
 
 ## The run

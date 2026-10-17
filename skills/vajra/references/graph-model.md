@@ -166,7 +166,7 @@ Portability warnings: text in `SKILL.md`, `principles.md`, `profile.md` or a pla
 
 Domain-fit warnings: a work or gate playbook whose "Done when", or all of whose steps, name nothing concrete (no command, path, metric or link); a profile without a `## Domain model`.
 
-Runtime warnings: `scripts/flow.mjs`, `scripts/guard.mjs` or `scripts/validate.mjs` missing, a runtime version different from the validator's, a router that does not mention `scripts/flow.mjs`.
+Runtime warnings: `scripts/flow.mjs`, `scripts/validate.mjs` or a file of `scripts/lib/` missing, a runtime version different from the validator's, a router that does not mention `scripts/flow.mjs`.
 
 Rails warnings: a guarded command that runs in steps behind different gates (ramp stages) and is named in one of them only in prose, or whose earlier step's command also fits a later step's (the runtime tells the stages apart by each step's own backtick command).
 

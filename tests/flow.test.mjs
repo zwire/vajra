@@ -96,7 +96,8 @@ function project({ rails = "standard" } = {}) {
   const skill = path.join(proj, ".claude", "skills", "demo-flow");
   fs.mkdirSync(path.join(skill, "playbooks"), { recursive: true });
   fs.mkdirSync(path.join(skill, "scripts"));
-  for (const f of ["flow.mjs", "guard.mjs", "validate.mjs"]) fs.copyFileSync(path.join(scripts, f), path.join(skill, "scripts", f));
+  for (const f of ["flow.mjs", "validate.mjs"]) fs.copyFileSync(path.join(scripts, f), path.join(skill, "scripts", f));
+  fs.cpSync(path.join(scripts, "lib"), path.join(skill, "scripts", "lib"), { recursive: true });
   fs.writeFileSync(path.join(skill, "SKILL.md"), "---\nname: demo-flow\ndescription: Demo. Only use when the user invokes demo-flow by name.\n---\n\nDrive runs with `scripts/flow.mjs`.\n\n[spike](playbooks/spike.md) [ship](playbooks/ship.md)\n");
   fs.writeFileSync(path.join(skill, "playbooks", "spike.md"), SPIKE);
   fs.writeFileSync(path.join(skill, "playbooks", "ship.md"), SHIP);
@@ -304,14 +305,14 @@ test("a line too deep or too costly to read is refused, not let through", () => 
 
 test("a hook that cannot read a call blocks only calls that name the rails, and never stops all work", () => {
   const p = project();
-  const scriptsDir = path.join(p.skill, "scripts");
-  fs.renameSync(path.join(scriptsDir, "guard.mjs"), path.join(p.proj, "guard.mjs.bak"));
+  const libDir = path.join(p.skill, "scripts", "lib");
+  fs.renameSync(path.join(libDir, "shell.mjs"), path.join(p.proj, "shell.mjs.bak"));
   assert.equal(p.bash("ls").status, 0);
   assert.equal(p.bash("npm test").status, 0);
   assert.equal(p.write("src/a.js").status, 0);
   let r = p.bash("rm -rf .flow");
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /could not read this call \(the runtime did not load: guard\.mjs/);
+  assert.match(r.stderr, /could not read this call \(the runtime did not load: hooks\.mjs: .*shell\.mjs/);
   assert.equal(p.write(".claude/skills/demo-flow/SKILL.md").status, 2);
   assert.equal(p.write(".github/hooks/demo-flow.json").status, 2);
   assert.equal(p.hook("pre-tool-use", { tool_name: "Bash", tool_input: { command: "rm -rf .\\.claude\\skills" } }).status, 2, "Windows paths");
@@ -322,10 +323,10 @@ test("a hook that cannot read a call blocks only calls that name the rails, and 
   assert.equal(p.bash("rm -rf .flow/demo-flow/runs").status, 0);
   assert.equal(p.cli("unsuspend").status, 0);
   // An outdated copy that lacks what flow.mjs needs counts as not loaded.
-  fs.writeFileSync(path.join(scriptsDir, "guard.mjs"), "export const guardMatches = () => false;\n");
+  fs.writeFileSync(path.join(libDir, "shell.mjs"), "export const guardMatches = () => false;\n");
   r = p.bash("rm .claude/skills/demo-flow/SKILL.md");
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /guard\.mjs lacks/);
+  assert.match(r.stderr, /shell\.mjs' does not provide an export named/);
   assert.equal(p.bash("ls").status, 0);
 });
 

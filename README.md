@@ -338,8 +338,8 @@ your-flow/
 ├── graph.md          Mermaid graph, rendered by the validator
 └── scripts/
     ├── flow.mjs      the runtime: CLI, lifecycle hooks, optional MCP server
-    ├── guard.mjs     how the hooks read shell and edit calls: guarded commands, and what touches the run state or the rails
-    └── validate.mjs  the validator (also used by the runtime)
+    ├── validate.mjs  the validator (also used by the runtime)
+    └── lib/          their modules: the hooks' shell and tool-call checks, run transitions, install, MCP
 
 .flow/your-flow/project.md   per repository, outside the skill: the values and the repository facts
 ```
@@ -428,7 +428,7 @@ skills/vajra/       the installable meta skill
     ├── validate.mjs          validator and graph renderer
     ├── interview.mjs         consult rounds as chat text, a one-page form, or a local form
     ├── flow.mjs              runtime (CLI, hooks, optional MCP), copied into every generated skill
-    └── guard.mjs             the hooks' shell and edit checks, part of the runtime
+    └── lib/                  modules of the runtime and the validator, copied with them
 examples/                     generated skills (calibration and test fixtures)
 evals/                        structural eval cases and runner
 tests/                        npm test
