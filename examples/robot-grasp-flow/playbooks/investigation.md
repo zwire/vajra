@@ -4,6 +4,7 @@ title: Investigation
 phase: any
 lifecycle: any
 kind: service
+writes: []
 terminal: true
 exits:
   - to: bug-fix

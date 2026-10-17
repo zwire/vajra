@@ -7,7 +7,7 @@ kind: {{work|gate|service}}
 promotes: {{from->to, e.g. throwaway->tracer; only on a gate that raises a lifecycle, otherwise delete this line}}
 checks:                      # {{commands that prove Done when mechanically, as bindings; delete if none}}
   - {{a binding, e.g. ${test}}}
-writes: [{{paths this playbook may edit, as bindings, e.g. ${scratch}/**; delete to allow all}}]
+writes: [{{paths this playbook may edit, as bindings, e.g. ${scratch}/**; [] if it edits none; delete to allow all}}]
 irreversible: [{{the commands of the [irreversible] steps, as bindings, e.g. ${deploy}; delete if none}}]
 exits:
   - to: {{next-id}}

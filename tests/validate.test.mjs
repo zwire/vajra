@@ -337,6 +337,28 @@ test("an irreversible pattern must appear in an irreversible step", () => {
   assert.ok(hasWarning(r, /pattern `terraform apply` appears in no \[irreversible\] step/));
 });
 
+test("a command used in steps behind different gates needs each step's own command", () => {
+  const r = validateSkill(makeSkill("x-flow", {
+    routes: ["a", "b"],
+    playbooks: [
+      { id: "a", extra: "irreversible: [${ramp}]\n", steps: ["[human-gate] Ask.", "[irreversible] Start with `${ramp} --percent 1`.", "[human-gate] Ask again.", "[irreversible] Widen the ramp with ${ramp}."] },
+      { id: "b", extra: "irreversible: [${ramp}]\n", steps: ["[human-gate] Ask.", "[irreversible] Start with `${ramp} --percent 1`.", "[human-gate] Ask again.", "[irreversible] Widen with `${ramp}`."] },
+    ],
+  }));
+  assert.ok(hasWarning(r, /a\.md: step 4 names `\$\{ramp\}` only in prose/));
+  assert.ok(hasWarning(r, /b\.md: step 2's command `\$\{ramp\} --percent 1` also fits step 4's/));
+});
+
+test("physical-world playbooks must declare what they write", () => {
+  const r = validateSkill(makeSkill("x-flow", {
+    routes: ["a", "b", "c"],
+    playbooks: [{ id: "a" }, { id: "b", extra: "writes: []\n" }, { id: "c", extra: "writes: [${code}]\n" }],
+    profile: { facets: "[physical-world]", hardware: "attached" },
+  }));
+  assert.ok(hasWarning(r, /a\.md: declares no `writes`/));
+  assert.ok(!hasWarning(r, /[bc]\.md: declares no `writes`/));
+});
+
 test("rails on: unguarded irreversible steps and missing checks are warnings", () => {
   const r = validateSkill(makeSkill("x-flow", {
     routes: ["a", "b"],

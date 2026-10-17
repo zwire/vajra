@@ -4,6 +4,7 @@ title: Hardware trial
 phase: extract
 lifecycle: any
 kind: gate
+writes: [${trials}/**]
 promotes: tracer->hardened
 irreversible:
   - ${heldout-eval}

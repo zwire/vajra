@@ -4,6 +4,7 @@ title: Decide
 phase: explore
 lifecycle: any
 kind: gate
+writes: [${decisions}/**]
 promotes: throwaway->tracer
 exits:
   - to: increment

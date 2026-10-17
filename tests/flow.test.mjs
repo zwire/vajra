@@ -482,11 +482,66 @@ Roll out in stages.
   p.cli("step", "1");
   p.hook("user-prompt", { prompt: "approve" });
   assert.equal(p.bash("rollout --percent 1").status, 0);
+  // The later stage waits for its own gate even before the earlier stage is recorded.
+  assert.match(p.bash("rollout --percent 50").stderr, /belongs to step 4 and step 3 \[human-gate\] is not approved/);
+  assert.match(p.bash("rollout --percent 50 --replicas 1").stderr, /belongs to step 4/);
+  assert.match(p.bash("rollout --percent 1 && rollout --percent 50").stderr, /belongs to step 4/);
+  assert.match(p.bash("rollout --percent 10").stderr, /matches none of them.*step 2: `rollout --percent 1`; step 4: `rollout --percent 50`/);
+  assert.equal(p.bash("rollout --percent 1 --dry-run").status, 0, "extra flags still fit the step's command");
+  assert.equal(p.bash("rollout '--percent' \"1\"").status, 0, "quotes still fit");
   p.cli("step", "2", "--evidence", "at 1%");
+  assert.equal(p.bash("rollout --percent 1").status, 0, "repeating a recorded stage keeps its own gate");
   assert.match(p.bash("rollout --percent 50").stderr, /belongs to step 4 and step 3 \[human-gate\] is not approved/);
   p.cli("step", "3");
   p.hook("user-prompt", { prompt: "approve" });
   assert.equal(p.bash("rollout --percent 50").status, 0);
+});
+
+test("a guarded command no step names is refused while its steps wait for different gates", () => {
+  const p = project();
+  fs.writeFileSync(path.join(p.skill, "playbooks", "ship.md"), `---
+id: ship
+title: Ship
+phase: any
+lifecycle: any
+kind: work
+irreversible: [\${rollout}, \${deploy}]
+exits:
+  - to: end
+    when: rolled out
+---
+
+## Purpose
+
+Roll out in stages.
+
+## Steps
+
+1. [human-gate] Approve the first stage.
+2. [irreversible] Run \`\${deploy}\`.
+3. [human-gate] Approve widening.
+4. [irreversible] Widen the release.
+
+## Done when
+
+- \`rollout status\` shows 50%.
+`);
+  p.cli("start", "ship", "--request", "roll out");
+  p.cli("step", "1");
+  p.hook("user-prompt", { prompt: "approve" });
+  assert.equal(p.bash("npm run deploy").status, 0);
+  assert.match(p.bash("rollout --percent 50").stderr, /no step names it/);
+});
+
+test("a command guarded in two playbooks runs inside either one", () => {
+  const p = project();
+  fs.writeFileSync(path.join(p.skill, "playbooks", "spike.md"), SPIKE.replace("writes: [\${scratch}/**]", "writes: [\${scratch}/**]\nirreversible: [\${deploy}]").replace("1. Try it in \`\${scratch}/\`.", "1. Try it in \`\${scratch}/\`.\n2. [human-gate] Confirm the preview.\n3. [irreversible] Run \`\${deploy}\` to a preview."));
+  p.cli("start", "spike", "--request", "try it");
+  assert.match(p.bash("npm run deploy").stderr, /belongs to step 3 and step 2/);
+  p.cli("step", "1", "--evidence", "tried");
+  p.cli("step", "2");
+  p.hook("user-prompt", { prompt: "approve" });
+  assert.equal(p.bash("npm run deploy").status, 0);
 });
 
 test("checks decide which exits open", () => {
@@ -521,6 +576,14 @@ test("writes are limited to the active playbook's paths, and state is protected"
   assert.equal(p.bash("npm run deploy").status, 2);
   p.cli("resume");
   assert.equal(p.write("src/app.js").status, 2);
+});
+
+test("writes: [] makes a playbook read-only", () => {
+  const p = project();
+  fs.writeFileSync(path.join(p.skill, "playbooks", "spike.md"), SPIKE.replace("writes: [\${scratch}/**]", "writes: []"));
+  p.cli("start", "spike", "--request", "look");
+  assert.match(p.write(path.join(p.proj, "scratch", "a.md")).stderr, /spike is read-only/);
+  assert.match(p.write(path.join(p.proj, "src", "a.js")).stderr, /spike is read-only/);
 });
 
 test("strict rails block edits without a run; advisory rails block nothing", () => {
