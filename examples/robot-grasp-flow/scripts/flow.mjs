@@ -844,10 +844,19 @@ export function main(argv) {
     try { input = JSON.parse(raw || "{}"); } catch {}
     if (!input || typeof input !== "object") input = {};
     const root = findRoot(typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd());
-    // Copilot also runs the hooks in .claude/settings*.json. Claude Code always sets CLAUDE_PROJECT_DIR,
-    // so a Claude hook run without it was run by another agent, which reads Copilot's fields. When
-    // Copilot has this skill's hooks in its own file too, both run and reach the same decision.
-    if (agent === "claude" && !process.env.CLAUDE_PROJECT_DIR) format = "copilot";
+    // Copilot CLI (and VS Code with chat.useClaudeHooks) also runs the hooks in .claude/settings*.json.
+    // Claude Code always sets CLAUDE_PROJECT_DIR and sends no timestamp; Copilot and VS Code do the
+    // opposite. A Claude hook run that way answers in Copilot's fields, and steps aside when this
+    // skill's hook for the event is in Copilot's own file, which that agent runs as well, so each
+    // event runs once. If either sign is missing it runs anyway: twice is better than not at all.
+    if (agent === "claude" && !process.env.CLAUDE_PROJECT_DIR) {
+      format = "copilot";
+      if (input.timestamp !== undefined) {
+        let own = "";
+        try { own = fs.readFileSync(path.join(root, ".github", "hooks", `${skillName}.json`), "utf8"); } catch {}
+        if (own.includes(`hook ${rest[0]} `)) return 0;
+      }
+    }
     try {
       if (loadError) throw new Error(`the runtime did not load: ${loadError}`);
       return runHook(rest[0], input, root, format);
