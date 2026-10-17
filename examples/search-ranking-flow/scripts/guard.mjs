@@ -502,17 +502,22 @@ function commandViolation(w, ctx) {
 // The rails' own definition: the skill (playbooks, profile, these scripts) and the agents' hook
 // settings. They change only while the human has suspended the rails, so the agent cannot switch
 // its own rails off (rails: advisory, a deleted guard, a removed hook, disableAllHooks).
-const HOOK_CONFIGS = [".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml"];
+// Files whose settings run or switch off the hooks: Claude Code's (which Copilot reads too), Codex's
+// and Copilot's own settings (they can hold hooks and disableAllHooks). VS Code's settings can turn
+// hooks off too (chat.useHooks) but are read often, so code that merely names them is not refused.
+const HOOK_CONFIGS = [".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml", ".github/copilot/settings.json", ".github/copilot/settings.local.json"];
 export function railsPaths(root, skillDir) {
-  const configs = [...HOOK_CONFIGS, `.github/hooks/${path.basename(skillDir)}.json`].map((f) => path.join(root, f));
-  configs.push(path.join(os.homedir(), ".claude", "settings.json"), path.join(os.homedir(), ".codex", "config.toml"));
+  const configs = [...HOOK_CONFIGS, ".vscode/settings.json", `.github/hooks/${path.basename(skillDir)}.json`].map((f) => path.join(root, f));
+  configs.push(...[".claude/settings.json", ".codex/config.toml", ".copilot/settings.json"].map((f) => path.join(os.homedir(), f)));
   return { skill: skillDir, configs, state: path.join(root, ".flow") };
 }
 // Paths compared as the most permissive file system would: any case, either slash.
 export const samePath = (a, b) => norm(a) === norm(b);
 export const inside = (p, dir) => samePath(p, dir) || norm(p).startsWith(norm(dir).replace(/\/$/, "") + "/");
 // Hook settings may change except where an edit drops a flow.mjs hook or turns hooks off.
-const DISABLES_HOOKS = /disableAllHooks|codex_hooks\s*=\s*false/i;
+const DISABLES_HOOKS = /disableAllHooks|codex_hooks\s*=\s*false|chat\.useHooks["']?\s*[:=]\s*false/i;
+// Codex: hooks = false under [features] (or features.hooks = false).
+const TOML_OFF = /\bhooks\s*=\s*false\b/;
 const DELETERS = /^(rm|rmdir|unlink|shred|mv|move|remove-item|ri|del|erase|rd|move-item|mi|rename-item|rni)$/;
 
 function railsViolation(w, ctx) {
@@ -583,7 +588,8 @@ export function shellViolation(command, ps, ctx) {
 // Whether an edit of a hook settings file removes a flow.mjs hook or turns hooks off.
 export function dropsHooks(abs, act) {
   const { removed, added, whole } = act.change;
-  if (DISABLES_HOOKS.test(added) || DISABLES_HOOKS.test(whole ?? "")) return true;
+  const off = (t) => DISABLES_HOOKS.test(t) || (/\.toml$/i.test(abs) && TOML_OFF.test(t));
+  if (off(added) || off(whole ?? "")) return true;
   // A hook command taken out must come back in the same edit: re-indenting or editing next to it is fine.
   const hookCommands = (t) => [...t.matchAll(/[^"'\n]*flow\.mjs[^"'\n]*/g)].map((m) => m[0].trim());
   if (hookCommands(removed).some((c) => !added.includes(c))) return true;

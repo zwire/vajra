@@ -6,7 +6,7 @@
 // refuses every move the graph does not allow, runs each playbook's checks before its exits open,
 // and interrupts at every [human-gate] until the human resumes it. The agent drives it as a CLI (no
 // context cost until used), and lifecycle hooks in Claude Code, Codex and GitHub Copilot (JSON on
-// stdin, exit code 2 blocks) enforce it whether or not the agent cooperates.
+// stdin, a JSON deny blocks) enforce it whether or not the agent cooperates.
 // An MCP server is available as an opt-in for clients that support MCP elicitation.
 //
 // Agent commands:
@@ -22,7 +22,7 @@
 //   flow reject --reason <text>                   refuse it
 //   flow suspend  |  flow unsuspend               turn the hooks off and on
 // Integration:
-//   flow hook <session-start|user-prompt|pre-tool-use|stop> [--format copilot]
+//   flow hook <session-start|user-prompt|pre-tool-use|stop> [--agent claude|codex|copilot]
 //                                                 lifecycle hook (JSON on stdin)
 //   flow install --harness <claude|codex|copilot>[,...]
 //                [--scope project|local] [--mcp] [--dry-run]
@@ -43,7 +43,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // The rest of the runtime is loaded here rather than imported, so a missing or outdated file is
-// caught: a hook that failed to start would exit 1, which agents treat as "allow" (see main).
+// caught and the hook falls back to a plain text check instead of failing (see degradedHook).
 const REQUIRED = {
   "validate.mjs": ["validateSkill", "commandMatches", "globToRegExp", "readProject", "projectFile", "resolveText", "resolveList", "VERSION"],
   "guard.mjs": ["guardMatches", "toolAction", "shellViolation", "dropsHooks", "railsPaths", "inside", "samePath", "codeTouchesRails"],
@@ -106,7 +106,7 @@ function loadGraph(root) {
     doneWhen: resolveText(n.doneWhen, values, missing),
     used: n.bindings.map((b) => [b, values.get(b)]),
   }));
-  // Guarded commands whose binding has no value cannot be recognized, so the hooks fail closed.
+  // Guarded commands whose binding has no value cannot be recognized; the session is told so.
   const guardGap = new Set();
   for (const n of r.nodes) resolveList(n.guards, values, guardGap);
   for (const name of Object.keys(r.bindings || {})) if (!values.has(name)) missing.add(name);
@@ -372,28 +372,35 @@ function cmdLog(st) {
 
 // ---------- install: hooks and MCP registration per harness ----------
 // The runtime is the same for every agent; only the configuration files differ. Each one runs
-// hook commands with a JSON payload on stdin and treats exit code 2 as "block".
+// hook commands with a JSON payload on stdin and reads a JSON deny on stdout.
+// The files are not private to one agent: Copilot CLI (and VS Code's Copilot) also runs the hooks in
+// .claude/settings*.json, without CLAUDE_PROJECT_DIR, and Claude Code and Codex run hooks from
+// wherever the agent is, which may be a subfolder. So the Claude and Codex commands find flow.mjs
+// from the root that node prints (CLAUDE_PROJECT_DIR when Claude Code set it, else git's, else the
+// current folder), which reads the same in sh, bash and PowerShell. Copilot's own file runs from the
+// root (cwd ".").
+const ROOT = `$(node -p "process.env.CLAUDE_PROJECT_DIR||(require('child_process').spawnSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8'}).stdout||'').trim()||'.'")`;
 
 const EVENTS = { "session-start": "SessionStart", "user-prompt": "UserPromptSubmit", "pre-tool-use": "PreToolUse", stop: "Stop" };
 
 const HARNESSES = {
   claude: {
     hooks: (scope) => (scope === "local" ? ".claude/settings.local.json" : ".claude/settings.json"),
-    rootVar: "$CLAUDE_PROJECT_DIR",
+    fromRoot: true,
     entry: (command) => ({ hooks: [{ type: "command", command }] }),
     mcp: { file: ".mcp.json", format: "json" },
   },
   codex: {
     hooks: () => ".codex/hooks.json",
+    fromRoot: true,
     entry: (command) => ({ hooks: [{ type: "command", command }] }),
     mcp: { file: ".codex/config.toml", format: "toml" },
-    note: "Codex runs project hooks only with `codex_hooks = true` under [features] in .codex/config.toml.",
+    note: "Codex runs project hooks once the project is trusted and you have reviewed the hooks with /hooks.",
   },
   // Copilot CLI, cloud agent and VS Code all read .github/hooks/*.json. PascalCase event names
-  // select the snake_case payload the hook reads; --format copilot shapes the output (see runHook).
+  // select the snake_case payload the hook reads; --agent copilot shapes the output (see runHook).
   copilot: {
     hooks: () => `.github/hooks/${skillName}.json`,
-    args: " --format copilot",
     entry: (command) => ({ type: "command", command, cwd: "." }),
     version: 1,
     note: "Copilot CLI runs repository hooks only in a folder you have trusted, and ignores UserPromptSubmit output, so run state is injected only at session start; chat approvals are still recorded.",
@@ -417,22 +424,29 @@ function install(root, o) {
   const report = [];
   const load = (file) => (writes.has(file) ? writes.get(file) : readJson(path.join(root, file)));
 
+  // This skill's hook commands in any form an earlier install wrote; they are replaced, not added to.
+  const ours = (c) => typeof c === "string" && /flow\.mjs["']?\s+hook\s/.test(c) && (c.includes(rel) || c.includes(script));
+
   for (const name of names) {
     const h = HARNESSES[name];
-    const target = !inRoot ? JSON.stringify(script) : h.rootVar ? `"${h.rootVar}/${rel}"` : JSON.stringify(rel);
+    const target = !inRoot ? JSON.stringify(script) : h.fromRoot ? `"${ROOT}/${rel}"` : JSON.stringify(rel);
     const file = h.hooks(scope);
     const cfg = load(file);
     if (h.version) cfg.version ||= h.version;
     const events = (cfg.hooks ||= {});
-    const added = [];
+    const changed = [];
     for (const [ev, native] of Object.entries(EVENTS)) {
-      const command = `node ${target} hook ${ev}${h.args || ""}`;
-      const list = (events[native] ||= []);
-      const has = list.some((x) => x.command === command || (x.hooks || []).some((y) => y.command === command));
-      if (!has) { list.push(h.entry(command)); added.push(native); }
+      const entry = h.entry(`node ${target} hook ${ev} --agent ${name}`);
+      const before = JSON.stringify(events[native] || []);
+      const list = (events[native] || [])
+        .map((x) => (x.hooks ? { ...x, hooks: x.hooks.filter((y) => !ours(y.command)) } : x))
+        .filter((x) => !ours(x.command) && !(x.hooks && !x.hooks.length));
+      list.push(entry);
+      events[native] = list;
+      if (!before.includes(JSON.stringify(entry))) changed.push(native);
     }
     writes.set(file, cfg);
-    report.push(`${name}: ${added.length ? `hooks ${added.join(", ")} added` : "hooks already present"} in ${file}${h.note ? ` (${h.note})` : ""}`);
+    report.push(`${name}: ${changed.length ? `hooks ${changed.join(", ")} written` : "hooks already present"} in ${file}${h.note ? ` (${h.note})` : ""}`);
 
     // MCP is opt-in: tool schemas cost context in every session, and only elicitation adds
     // something the CLI and hooks do not.
@@ -488,9 +502,6 @@ function install(root, o) {
 // ---------- lifecycle hooks (tool-agnostic) ----------
 // What a tool call does and whether it touches the rails is read in guard.mjs.
 
-function readStdin() {
-  try { return JSON.parse(fs.readFileSync(0, "utf8") || "{}"); } catch { return {}; }
-}
 
 const RAILS_MSG = "the workflow's own rules (its playbooks, profile and scripts) and the hooks that enforce them change only while the user has suspended the rails. Stop and ask the user to run `flow suspend` first.";
 
@@ -605,20 +616,14 @@ function context(input, text, format) {
   return JSON.stringify(format === "copilot" ? { additionalContext: text, ...out } : out);
 }
 
-// Exit code 2 with the reason on stderr is the common protocol. Copilot drops stderr and shows
-// only "hook exited with code 2", so it gets the reason as a structured deny instead.
-function blockTool(reason, format) {
-  if (format === "copilot") {
-    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${tag} Blocked: ${reason}` } }));
-    return 0;
-  }
-  process.stderr.write(`${tag} Blocked: ${reason}\n`);
-  return 2;
+// A deny in JSON on stdout (exit 0) is read alike by Claude Code, Codex, Copilot and VS Code, and,
+// unlike exit code 2, survives PowerShell, which reports any failed native command as exit 1.
+function blockTool(reason) {
+  console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${tag} Blocked: ${reason}` } }));
+  return 0;
 }
 
-function runHook(event, format) {
-  const input = readStdin();
-  const root = findRoot(input.cwd || process.cwd());
+function runHook(event, input, root, format) {
   const g = loadGraph(root);
   const st = openStore(root);
   const state = st.load();
@@ -646,7 +651,7 @@ function runHook(event, format) {
     const reason = preToolUse(g, state, input, root);
     if (!reason) return 0;
     st.log({ event: "block-tool", tool: input.tool_name, reason });
-    return blockTool(reason, format);
+    return blockTool(reason);
   }
   if (event === "stop") {
     const reason = stopCheck(g, state, input, root);
@@ -657,6 +662,26 @@ function runHook(event, format) {
     return 0;
   }
   console.error(`unknown hook event "${event}"`);
+  return 0;
+}
+
+// A hook that crashed (on a payload it does not understand, or with a broken runtime) must not stop
+// all work, nor let the rails be changed. It blocks only calls whose text names the workflow's own
+// files or the hook settings, which a plain search finds without understanding the call.
+const NAMES_RAILS = /\.flow\b|flow\.mjs|\.claude[\\/]|\.codex[\\/]|\.github[\\/](hooks|copilot)|\.vscode[\\/]settings|disableAllHooks|useHooks/i;
+
+function degradedHook(event, e, text, root, format) {
+  let suspended = false;
+  try { suspended = JSON.parse(fs.readFileSync(path.join(openStore(root).dir, "state.json"), "utf8")).suspended === true; } catch {}
+  if (event === "pre-tool-use") {
+    const t = text.replace(/\\\\/g, "/");
+    const rel = relPath(root, skillDir);
+    if (suspended || !(NAMES_RAILS.test(t) || (rel && t.includes(rel)))) return 0;
+    return blockTool(`the rails could not read this call (${e.message}), and it names the workflow's own files. Stop and ask the user.`);
+  }
+  if ((event === "session-start" || event === "user-prompt") && !suspended) {
+    console.log(context({ hook_event_name: event === "user-prompt" ? "UserPromptSubmit" : "SessionStart" }, `${tag} The rails are degraded (${e.message}): only calls that name the workflow's own files are blocked. Tell the user, who can copy the runtime from vajra again or run \`flow suspend\`.`, format));
+  }
   return 0;
 }
 
@@ -697,8 +722,6 @@ export function execute(cmd, pos = [], o = {}, root = findRoot()) {
       case "resume": needRun(state).paused = null; st.log({ event: "resume", run: state.run.id }); break;
       case "approve": { const n = approve(state, o.by || os.userInfo().username, o.note); st.log({ event: "approve", run: state.run.id, step: n, by: o.by || "cli" }); break; }
       case "reject": { const n = reject(state, o.by || os.userInfo().username, o.reason); st.log({ event: "reject", run: state.run.id, step: n, reason: o.reason }); break; }
-      case "suspend": state.suspended = true; st.log({ event: "suspend" }); break;
-      case "unsuspend": state.suspended = false; st.log({ event: "unsuspend" }); break;
       default: throw new Stop(`unknown command "${cmd}"; run \`flow help\``, 2);
     }
     st.save(state);
@@ -812,16 +835,35 @@ export function serveMcp(input = process.stdin, output = process.stdout) {
 export function main(argv) {
   const [cmd, ...rest] = argv;
   if (cmd === "hook") {
-    const format = parseArgs(rest.slice(1)).o.format;
+    const { o } = parseArgs(rest.slice(1));
+    const agent = o.agent || (o.format === "copilot" ? "copilot" : undefined); // --format copilot: hooks installed before --agent
+    let format = agent === "copilot" ? "copilot" : undefined;
+    let raw = "";
+    try { raw = fs.readFileSync(0, "utf8"); } catch {}
+    let input = {};
+    try { input = JSON.parse(raw || "{}"); } catch {}
+    if (!input || typeof input !== "object") input = {};
+    const root = findRoot(typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd());
+    // Copilot also runs the hooks in .claude/settings*.json. Claude Code always sets CLAUDE_PROJECT_DIR,
+    // so a Claude hook run without it was run by another agent, which reads Copilot's fields. When
+    // Copilot has this skill's hooks in its own file too, both run and reach the same decision.
+    if (agent === "claude" && !process.env.CLAUDE_PROJECT_DIR) format = "copilot";
     try {
       if (loadError) throw new Error(`the runtime did not load: ${loadError}`);
-      return runHook(rest[0], format);
+      return runHook(rest[0], input, root, format);
     } catch (e) {
-      // A crashed tool hook exits 1, which agents treat as "allow"; refuse the call instead.
-      if (rest[0] === "pre-tool-use") return blockTool(`the rails could not check this call (${e.message}). Stop and ask the user.`, format);
-      if (rest[0] === "session-start" || rest[0] === "user-prompt") console.log(context({ hook_event_name: rest[0] === "user-prompt" ? "UserPromptSubmit" : "SessionStart" }, `${tag} The rails are broken (${e.message}); every tool call is blocked until the user repairs the skill's scripts/.`, format));
-      return 0;
+      return degradedHook(rest[0], e, Object.keys(input).length ? JSON.stringify(input) : raw, root, format);
     }
+  }
+  // The user's way out works even when the runtime or the workflow graph is broken.
+  if (cmd === "suspend" || cmd === "unsuspend") {
+    const st = openStore(findRoot());
+    const state = st.load();
+    state.suspended = cmd === "suspend";
+    st.save(state);
+    st.log({ event: cmd });
+    console.log(`${tag} ${state.suspended ? "Rails suspended: the hooks allow everything until flow unsuspend." : "Rails back on."}`);
+    return 0;
   }
   if (loadError) { console.error(`${tag} the runtime did not load: ${loadError}`); return 1; }
   if (cmd === "mcp") { serveMcp(); return undefined; }

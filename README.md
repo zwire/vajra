@@ -128,7 +128,7 @@ vajra fixes both. It builds the graph **around you**, and **enforces** it.
 
 - **🛤️ Rails, not reminders.** Every generated skill carries `flow.mjs`, a zero-dependency runtime. It tracks which playbook owns the request and refuses exits the graph does not have. It runs each playbook's checks before any exit opens, and red checks route the run down the failure exit. Installed as lifecycle hooks, it blocks guarded irreversible commands until a human approves, limits edits to the active playbook's paths, and keeps the agent from touching its own run state.
 - **♻️ Reusable across repositories.** The skill holds your way of working and your domain, never one repository. Commands, paths, URLs and other values of one repository are bindings (`${test}`, `${code}/**`), declared in the skill's `bindings.md` and given per project in `.flow/<skill>/project.md`. The validator rejects literal rails values and warns on repository paths anywhere in the skill.
-- **🧩 No lock-in.** The generated skill is plain Agent Skills with spec-only frontmatter and no links outside itself. The runtime is a CLI any agent can run, and the hooks use the protocol current agents share (JSON on stdin, exit code 2 blocks). One command installs them for Claude Code, Codex and GitHub Copilot (CLI, cloud agent and VS Code).
+- **🧩 No lock-in.** The generated skill is plain Agent Skills with spec-only frontmatter and no links outside itself. The runtime is a CLI any agent can run, and the hooks use the protocol current agents share (JSON in, a JSON deny out). One command installs them for Claude Code, Codex and GitHub Copilot (CLI, cloud agent and VS Code), and the three can share one repository in any install order.
 - **🎯 Fits your domain, not a preset.** There are no "web" or "robotics" packs. vajra builds a domain model for you, split into areas as finely as the graph needs. It uses ten cross-cutting facets (measured outcome, stand-in ladder, physical world, data mutation…) as a checklist. The validator flags any playbook whose steps or "Done when" name nothing real.
 - **🔥 It grills you before it builds, lightly.** It asks short rounds of choices, each pre-set to a recommendation, through your agent's own question tool, a one-page form, or plain text. It pushes back on process you would never run and on safeguards you forgot.
 - **🧪 → 🏭 Exploration that can graduate.** Work is labeled `throwaway`, `tracer` or `hardened`. A label rises only through a gate that declares the raise, and spike code is rebuilt instead of promoted. Throwaway playbooks can write only to their scratch paths.
@@ -153,7 +153,7 @@ flowchart TB
   subgraph rails ["Rails"]
     direction LR
     F["flow.mjs<br/>CLI runtime"]
-    K{{"Lifecycle hooks<br/>exit 2 = blocked"}}
+    K{{"Lifecycle hooks<br/>JSON deny = blocked"}}
   end
   G["playbooks/*.md<br/>graph + rails"]
   S[(".flow/your-flow/<br/>state + log")]
@@ -181,7 +181,7 @@ flowchart TB
 |---|---|---|
 | Packaging | Agent Skills | Any agent that loads skills can load the generated skill |
 | Driving the run | Plain CLI (`node scripts/flow.mjs …`) | Every agent can run it, and it costs no context until used |
-| Enforcement | Lifecycle hooks (JSON on stdin, exit 2 blocks) | Blocks and context injection that work whether or not the agent cooperates |
+| Enforcement | Lifecycle hooks (JSON on stdin, a JSON deny blocks) | Blocks and context injection that work whether or not the agent cooperates |
 | Optional | MCP elicitation | A gate dialog the model cannot answer, for clients that support it (off by default: MCP tools cost context every session) |
 
 A gated rollout in the generated `search-ranking-flow`. The agent never decides on its own that the ramp may widen:
