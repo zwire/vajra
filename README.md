@@ -167,8 +167,8 @@ $ (agent) abctl ramp search-ranker-0412 --percent 50
 | Only declared exits, only after "Done when" | `flow exit` refuses anything else; `flow finish` needs every step recorded |
 | Checks decide the branch | `checks:` run on finish; exits marked `on: pass` / `on: fail` open accordingly |
 | Human gates pass only by the human | The prompt hook records `approve` / `reject` from the human's message, or the human runs `flow approve` in their own terminal; the agent's attempts are blocked |
-| Irreversible commands wait for their gate | The tool hook matches `irreversible:` patterns and checks the gate before the step the command belongs to. When two steps run the same command (two ramp stages), the next pending one is the one checked, so record each stage as it completes |
-| Throwaway stays throwaway | `writes: [${scratch}/**]` limits edits while a throwaway playbook is active |
+| Irreversible commands wait for their gate | The tool hook matches `irreversible:` patterns and checks the gate before the step the command belongs to. When steps behind different gates run the same command (two ramp stages), it is matched against each step's own command, and a later stage never passes on an earlier stage's approval |
+| Throwaway stays throwaway | `writes: [${scratch}/**]` limits edits while a throwaway playbook is active; `writes: []` makes a playbook read-only |
 | The agent stays oriented | Current playbook and next move are injected at session start and on every prompt during a run (Copilot CLI drops prompt-hook output, so there only at session start); stopping mid-playbook is bounced once per state of progress |
 
 Three levels (`advisory`, `standard`, `strict`) come from your profile. Install the hooks for the agents you use:
@@ -194,7 +194,7 @@ The [rails reference](skills/vajra/references/rails.md) spells out what is enfor
 | You say | You get |
 |---|---|
 | *"Offline experiments on click logs, then shadow traffic, then an A/B ramp. Revenue is on the line."* | Hypothesis → offline experiment → **decide** → ranker build with NDCG and latency checks → shadow validation → **A/B ramp** where the held-out week is spent once and the 1% and 50% stages each wait for the product owner. [Graph](examples/search-ranking-flow/graph.md) |
-| *"Pick-and-place arm, ROS 2, Gazebo, one real arm. Sim first; the arm must be safe."* | Spikes in Gazebo and on bags → **decide** → increment → sim scenarios → **hardware trial** with an operator gate. The arm launch is a guarded command, and increment's `writes` leaves the safety limits file out. [Graph](examples/robot-grasp-flow/graph.md) |
+| *"Pick-and-place arm, ROS 2, Gazebo, one real arm. Sim first; the arm must be safe."* | Spikes in Gazebo and on bags → **decide** → increment → sim scenarios → **hardware trial** with an operator gate. The arm launch is a guarded command, and every playbook's `writes` leaves the safety limits file out. [Graph](examples/robot-grasp-flow/graph.md) |
 | *"Two-week sprints, QA sign-off. B2B invoicing; customers' ERPs call our API."* | Sprint spine, expand-then-contract API changes with an OpenAPI breaking-change check, and a **QA release gate** with a migration dry run. Triggers automatically. [Graph](examples/scrum-team-flow/graph.md) |
 | *"Infusion pump software, IEC 62304 class B. Traceability, named approver."* | V-model with trace checks that route pass and fail, guarded baseline and release commands, and strict rails: no edit without an active playbook. [Graph](examples/medical-v-model-flow/graph.md) |
 
