@@ -4,6 +4,7 @@ title: Ship
 phase: any
 lifecycle: any
 kind: work
+writes: [${code}]
 checks:
   - ${test}
 exits:

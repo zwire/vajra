@@ -28,6 +28,7 @@ Software moves, powers, heats, or can brick something physical: robots, vehicles
 ## Rails
 
 - `irreversible`: every command that moves, powers, flashes or changes safety limits of real hardware (launch files, flash tools, limit configs).
+- `writes` on every playbook, leaving the safety limits out (`writes: []` for one that edits nothing), so no playbook can edit them with the agent's edit tools.
 - `rails` at least `standard`; `strict` when people are nearby.
 
 ## Questions

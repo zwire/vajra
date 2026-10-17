@@ -56,7 +56,7 @@ Rails fields, all optional (see [rails.md](rails.md)). Their values differ per r
 checks:                        # commands that must exit 0 for the run to take pass exits
   - ${test}
   - ${typecheck}
-writes: [${scratch}/**]        # paths the playbook may edit (globs from the project root)
+writes: [${scratch}/**]        # paths the playbook may edit (globs from the project root); [] for none, omit for any
 irreversible:                  # commands of its [irreversible] steps; blocked elsewhere and before its human gate
   - ${deploy}
   - /ros2 launch \S+ ${real-launch}/
@@ -168,7 +168,9 @@ Domain-fit warnings: a work or gate playbook whose "Done when", or all of whose 
 
 Runtime warnings: `scripts/flow.mjs`, `scripts/guard.mjs` or `scripts/validate.mjs` missing, a runtime version different from the validator's, a router that does not mention `scripts/flow.mjs`.
 
-Composition warnings compare the profile with the graph (rules from [composition.md](composition.md)): the journey leaves explore but nothing promotes from `throwaway`; the journey reaches extract but nothing promotes to `hardened`; lifecycles exist that the journey does not include; a regulated profile has a promotion gate without a `[human-gate]`; hardware or customer-facing production without any `[irreversible]` step; `[irreversible]` steps without guarded commands when rails are on; hardware without the `physical-world` facet; an explicit-invocation profile whose description does not say so; `physical-world` with advisory rails; regulated work without strict rails; kept-code playbooks without `checks` when `verification` is not `evidence`. Fix them, or record the reason in `profile.md` under `## Composition notes`.
+Rails warnings: a guarded command that runs in steps behind different gates (ramp stages) and is named in one of them only in prose, or whose earlier step's command also fits a later step's (the runtime tells the stages apart by each step's own backtick command).
+
+Composition warnings compare the profile with the graph (rules from [composition.md](composition.md)): the journey leaves explore but nothing promotes from `throwaway`; the journey reaches extract but nothing promotes to `hardened`; lifecycles exist that the journey does not include; a regulated profile has a promotion gate without a `[human-gate]`; hardware or customer-facing production without any `[irreversible]` step; `[irreversible]` steps without guarded commands when rails are on; hardware without the `physical-world` facet; an explicit-invocation profile whose description does not say so; `physical-world` with advisory rails; regulated work without strict rails; kept-code playbooks without `checks` when `verification` is not `evidence`; `physical-world` playbooks without `writes`. Fix them, or record the reason in `profile.md` under `## Composition notes`.
 
 ## Topology rules
 

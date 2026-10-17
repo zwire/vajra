@@ -4,6 +4,7 @@ title: Bug fix
 phase: any
 lifecycle: any
 kind: service
+writes: [${code}]
 exits:
   - to: sim-validation
     when: the fix touches perception, planning or motion

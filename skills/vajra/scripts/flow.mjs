@@ -45,7 +45,7 @@ import { fileURLToPath } from "node:url";
 // The rest of the runtime is loaded here rather than imported, so a missing or outdated file is
 // caught and the hook falls back to a plain text check instead of failing (see degradedHook).
 const REQUIRED = {
-  "validate.mjs": ["validateSkill", "commandMatches", "globToRegExp", "readProject", "projectFile", "resolveText", "resolveList", "VERSION"],
+  "validate.mjs": ["validateSkill", "commandMatches", "globToRegExp", "readProject", "projectFile", "resolveText", "resolveList", "stepCommands", "fitsStep", "gatesBefore", "VERSION"],
   "guard.mjs": ["guardMatches", "toolAction", "shellViolation", "dropsHooks", "railsPaths", "inside", "samePath", "codeTouchesRails"],
 };
 let loadError = null;
@@ -58,7 +58,7 @@ for (const [file, names] of Object.entries(REQUIRED)) {
     Object.assign(lib, m);
   } catch (e) { loadError ||= `${file}: ${e.message}`; }
 }
-const { validateSkill, commandMatches, globToRegExp, readProject, projectFile, resolveText, resolveList, VERSION } = lib;
+const { validateSkill, commandMatches, globToRegExp, readProject, projectFile, resolveText, resolveList, stepCommands, fitsStep, gatesBefore, VERSION } = lib;
 const { guardMatches, toolAction, shellViolation, dropsHooks, railsPaths, inside, samePath, codeTouchesRails } = lib;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -100,7 +100,7 @@ function loadGraph(root) {
   const nodes = r.nodes.map((n) => ({
     ...n,
     checks: resolveList(n.checks, values, missing),
-    writes: resolveList(n.writes, values, missing),
+    writes: n.writes && resolveList(n.writes, values, missing),
     guards: resolveList(n.guards, values, missing),
     steps: n.steps.map((s) => ({ ...s, text: resolveText(s.text, values, missing) })),
     doneWhen: resolveText(n.doneWhen, values, missing),
@@ -165,13 +165,23 @@ function blockingGate(node, run, n) {
   return null;
 }
 
-// The [irreversible] step a guarded command belongs to: the first pending step whose text mentions
-// it, else the last one that does, else the first irreversible step. Gates before that step must
-// be approved, so a second rollout stage waits for its own gate.
-function guardedStep(node, run, pat) {
+// The [irreversible] step a guarded command belongs to, so the gates before that step must be
+// approved. When the steps that could own it wait for different gates (a ramp to 1% after one gate,
+// to 50% after another), the command is matched against each step's own command, and of those it
+// fits the one behind the most gates wins, so a later stage never passes on an earlier stage's
+// approval. A command that fits none of them, or that no step names, returns null: the hook refuses
+// it rather than guess.
+function guardedStep(node, run, pat, line) {
   const irr = node.steps.filter((s) => s.irreversible);
   const mentions = irr.filter((s) => { try { return commandMatches(pat, s.text); } catch { return false; } });
-  return mentions.find((s) => run.steps[s.n]?.status === "pending") || mentions[mentions.length - 1] || irr[0];
+  const pool = mentions.length ? mentions : irr;
+  const pick = (list) => list.find((s) => run.steps[s.n]?.status === "pending") || list[list.length - 1];
+  if (new Set(pool.map((s) => gatesBefore(node.steps, s.n))).size <= 1) return pick(pool);
+  if (!mentions.length) return null;
+  const fits = mentions.filter((s) => fitsStep(s, pat, line));
+  if (!fits.length) return null;
+  const most = Math.max(...fits.map((s) => gatesBefore(node.steps, s.n)));
+  return pick(fits.filter((s) => gatesBefore(node.steps, s.n) === most));
 }
 
 function allowedExits(node, run) {
@@ -568,23 +578,34 @@ function preToolUse(g, state, input, root) {
       if (run.paused && rails === "strict") return `the run is paused; \`${f} resume\` before editing.`;
       if (run.paused) continue; // a paused run leaves the agent free for other work; guarded commands stay blocked
       const node = g.nodes.get(run.playbook);
-      if (node.writes.length && !node.writes.some((w) => globToRegExp(w).test(rel))) {
-        return `playbook ${node.id} may only write ${node.writes.join(", ")}; ${rel} is outside. Finish the playbook and take an exit to one that owns this path.`;
+      if (node.writes && !node.writes.some((w) => globToRegExp(w).test(rel))) {
+        return `playbook ${node.id} ${node.writes.length ? `may only write ${node.writes.join(", ")}; ${rel} is outside` : `is read-only (\`writes: []\`), so it may not edit ${rel}`}. Finish the playbook and take an exit to one that owns this path.`;
       }
     }
     return null;
   }
 
   for (const { command: cmd, ps } of act.lines || []) {
-    for (const node of g.nodes.values()) {
-      for (const pat of node.guards) {
-        if (!guardMatches(pat, cmd, { ps })) continue;
-        if (!run || run.playbook !== node.id) return `\`${pat}\` is irreversible and runs only inside playbook ${node.id}, after its human gate. Current playbook: ${run ? run.playbook : "none"}.`;
-        if (run.paused) return "the run is paused.";
-        const step = guardedStep(node, run, pat);
-        const gate = blockingGate(node, run, step ? step.n : Infinity);
-        if (gate) return `\`${pat}\` belongs to step ${step.n} and step ${gate.n} [human-gate] is not approved. Run \`${f} step ${gate.n}\`, then stop and ask the user.`;
+    // Several playbooks may guard the same command; it runs only inside one of them.
+    const owners = [...g.nodes.values()].map((node) => [node, node.guards.filter((pat) => guardMatches(pat, cmd, { ps }))]).filter(([, pats]) => pats.length);
+    if (!owners.length) continue;
+    const own = run && owners.find(([node]) => node.id === run.playbook);
+    if (!own) {
+      const ids = owners.map(([node]) => node.id).join(" or ");
+      return `\`${owners[0][1][0]}\` is irreversible and runs only inside playbook ${ids}, after its human gate. Current playbook: ${run ? run.playbook : "none"}.`;
+    }
+    if (run.paused) return "the run is paused.";
+    const [node, pats] = own;
+    for (const pat of pats) {
+      const step = guardedStep(node, run, pat, cmd);
+      if (!step) {
+        const forms = node.steps.filter((s) => s.irreversible).flatMap((s) => stepCommands(s, pat).map((x) => `step ${s.n}: \`${x}\``));
+        return forms.length
+          ? `\`${pat}\` runs in more than one step of ${node.id}, behind different gates, and this command matches none of them, so the rails cannot tell which gate it needs. Write it as its step does (${forms.join("; ")}).`
+          : `\`${pat}\` is guarded in ${node.id}, but no step names it, so the rails cannot tell which gate it needs. Stop and ask the user; the playbook should name the command in its [irreversible] step.`;
       }
+      const gate = blockingGate(node, run, step.n);
+      if (gate) return `\`${pat}\` belongs to step ${step.n} and step ${gate.n} [human-gate] is not approved. Run \`${f} step ${gate.n}\`, then stop and ask the user.`;
     }
   }
   return null;

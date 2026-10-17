@@ -4,6 +4,7 @@ title: Sim validation
 phase: expand
 lifecycle: tracer
 kind: work
+writes: []
 checks:
   - ${sim-scenarios} --all --report ${sim-report}
 exits:

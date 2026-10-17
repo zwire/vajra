@@ -74,6 +74,30 @@ export function commandMatches(pattern, command) {
   return re ? new RegExp(re[1], re[2]).test(cmd) : cmd.includes(pattern.replace(/\s+/g, " ").trim());
 }
 
+// A step's own commands for a guarded pattern: the backtick spans of its text that the pattern
+// matches. A step that names the command only in prose has none.
+export function stepCommands(step, pattern) {
+  return [...step.text.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim()).filter((x) => { try { return commandMatches(pattern, x); } catch { return false; } });
+}
+
+// Whether a command line could be this step's: every word of one of its commands appears in the
+// line in order, with `<...>` standing for any value. Other words (flags, quotes) may come between.
+// A step without its own command fits any line.
+export function fitsStep(step, pattern, line) {
+  const own = stepCommands(step, pattern);
+  if (!own.length) return true;
+  const words = String(line).trim().split(/\s+/).map((w) => w.replace(/^["']+|["']+$/g, ""));
+  return own.some((x) => {
+    const tpl = x.split(/\s+/).map((t) => new RegExp(`^${t.split(/<[^<>]*>/).map((q) => q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("\\S+")}$`));
+    let i = 0;
+    for (const w of words) if (i < tpl.length && tpl[i].test(w)) i++;
+    return i === tpl.length;
+  });
+}
+
+// Human gates before step n: steps with the same count wait for the same gates.
+export const gatesBefore = (steps, n) => steps.filter((s) => s.n < n && s.humanGate).length;
+
 // Path globs relative to the project root: ** spans directories, * and ? stay within one.
 export function globToRegExp(glob) {
   let re = "";
@@ -325,7 +349,7 @@ export function validatePlaybook(text, id, where = `playbooks/${id}.md`, skillDi
     steps,
     doneWhen: (secs.get("Done when") || []).join("\n").trim(),
     checks: [],
-    writes: [],
+    writes: null,
     guards: [],
   };
 
@@ -355,10 +379,10 @@ export function validatePlaybook(text, id, where = `playbooks/${id}.md`, skillDi
     return v;
   };
   node.checks = strList("checks");
-  node.writes = strList("writes");
+  node.writes = data.writes === undefined ? null : strList("writes"); // [] means the playbook edits nothing
   node.guards = strList("irreversible");
   // Rails values differ per repository, so they come from the project through bindings.
-  for (const [key, list] of [["checks", node.checks], ["writes", node.writes], ["irreversible", node.guards]]) {
+  for (const [key, list] of [["checks", node.checks], ["writes", node.writes || []], ["irreversible", node.guards]]) {
     for (const x of list) if (!bindingNames(x).size) err(`\`${key}\` entry \`${x}\` is a literal; rails values belong to the project: write \`\${name}\` and declare name in bindings.md`);
   }
   // Check patterns against step text with every binding standing for itself.
@@ -370,7 +394,22 @@ export function validatePlaybook(text, id, where = `playbooks/${id}.md`, skillDi
   for (const g of node.guards) {
     let hit = false;
     try { hit = steps.some((s) => s.irreversible && commandMatches(resolveText(g, self), s.text)); } catch { hit = true; }
-    if (node.irreversibleSteps && !hit) warn(`irreversible pattern \`${g}\` appears in no [irreversible] step; name the command in the step so the runtime knows which gate guards it`);
+    if (node.irreversibleSteps && !hit) warn(`irreversible pattern \`${g}\` appears in no [irreversible] step; name the command in the step so the runtime knows which gate guards it (while the irreversible steps wait for different gates, the hook refuses it)`);
+  }
+  // A command used in steps behind different gates (ramp stages) is told apart by each step's own
+  // command, so every such step needs one, and an earlier stage's must not fit a later stage.
+  for (const g of node.guards) {
+    let pat, mentions;
+    try { pat = resolveText(g, self); mentions = steps.filter((s) => s.irreversible && commandMatches(pat, s.text)); } catch { continue; }
+    const gates = (s) => gatesBefore(steps, s.n);
+    if (new Set(mentions.map(gates)).size < 2) continue;
+    const bare = mentions.filter((s) => !stepCommands(s, pat).length);
+    for (const s of bare) warn(`step ${s.n} names \`${g}\` only in prose, but the command runs in steps behind different gates; write it in backticks as the step runs it (\`${g} --stage <name>\`) so the runtime can tell which gate it needs`);
+    for (const a of mentions) for (const b of mentions) {
+      if (gates(a) >= gates(b) || bare.includes(b)) continue;
+      const x = stepCommands(a, pat).find((c) => fitsStep(b, pat, c));
+      if (x) warn(`step ${a.n}'s command \`${x}\` also fits step ${b.n}'s, so the runtime would hold it for step ${b.n}'s gate; make step ${b.n}'s command more specific`);
+    }
   }
 
   if (data.exits !== undefined && !Array.isArray(data.exits)) err("exits must be a list");
@@ -463,6 +502,7 @@ function checkComposition(profile, skillFm, nodes, err, warn) {
   const facets = new Set(Array.isArray(profile.facets) ? profile.facets : []);
   const rails = profile.rails;
   if (rails && rails !== "advisory") {
+    if (facets.has("physical-world")) for (const n of list) if (!n.writes) warn(`playbooks/${n.id}.md`, "declares no `writes`, so it may edit any file, the safety limits included; list the paths it edits, or `writes: []` if it edits none");
     for (const n of list) if (n.irreversibleSteps > 0 && n.guards.length === 0) warn(`playbooks/${n.id}.md`, "has [irreversible] steps but declares no `irreversible` command patterns, so the hooks cannot block them");
   }
   if (profile.hardware && profile.hardware !== "none" && !facets.has("physical-world")) warn(where, `hardware is ${profile.hardware} but facets lack physical-world`);
