@@ -12,7 +12,15 @@ import { shellCommands, programName, commandStart } from "./shell.mjs";
 export function codeTouchesRails(text, ctx) {
   const t = norm(text);
   const rel = norm(path.relative(ctx.root, ctx.skillDir));
-  return /\.flow/.test(t) || /flow\.mjs/.test(t) || (rel !== "" && t.includes(rel)) || HOOK_CONFIGS.some((f) => t.includes(f)) || DISABLES_HOOKS.test(text);
+  return /\.flow/.test(t) || namesRuntime(text, ctx) || (rel !== "" && t.includes(rel)) || HOOK_CONFIGS.some((f) => t.includes(f)) || DISABLES_HOOKS.test(text);
+}
+
+// Whether text names the runtime's code: flow.mjs, or a module in the skill's scripts/lib/ (which
+// can write the run state or answer a gate when loaded). The skill may sit outside the project, so
+// its name is matched, not its path. ctx = { skillDir }, optional.
+export function namesRuntime(text, ctx) {
+  const t = norm(text).replace(/\/(\.\/)+/g, "/").replace(/\/{2,}/g, "/");
+  return /flow\.mjs/.test(t) || (!!ctx?.skillDir && t.includes(`${norm(path.basename(ctx.skillDir))}/scripts/lib/`));
 }
 
 // ---------- shell access to the run state and to the human-only commands ----------
@@ -70,7 +78,8 @@ const SCRIPTED = new Set(["sed", "awk", "gawk", "less"]);
 const OUTPUT_FLAG = /^(-o|--output|--output-file|--log-file|-outfile)$/i;
 const GIT_READS = new Set(["add", "commit", "log", "show", "diff", "status", "blame", "ls-files", "ls-tree", "grep", "cat-file", "check-ignore", "rev-parse", "describe", "shortlog"]);
 const INTERPRETERS = /^(python\d*(\.\d+)?|node|nodejs|deno|bun|ruby|perl|php|osascript|lua|tclsh)$/;
-const HUMAN_ONLY = new Set(["approve", "reject", "suspend", "unsuspend", "hook", "mcp"]);
+// `unsuspend` only turns the rails back on, so the agent may run it, and `request suspend` only asks.
+const HUMAN_ONLY = new Set(["approve", "reject", "suspend", "hook", "mcp"]);
 
 // The program a simple command runs and its arguments, past assignments and wrappers like sudo.
 function head(w) {
@@ -115,12 +124,37 @@ function copyDestination(name, args) {
   return args.filter((x) => !/^-/.test(x.text)).pop() ?? null;
 }
 
+// ---------- prompts the agent could put in the human's place ----------
+// The human answers a gate or a suspend request with a prompt that starts with one of these words.
+// A prompt the agent writes must not start with one, wherever it would be submitted: to another
+// agent session it starts (whose hooks are this skill's, so its prompt would count as the human's),
+// or to one it schedules or sends.
+export const REPLY_WORD = /^\s*(approve|reject|suspend)(?![\w-])/i;
+const AGENT_CLIS = new Set(["claude", "codex", "copilot"]);
+const RUNNERS = new Set(["timeout", "gtimeout", "xargs", "setsid", "stdbuf", "unbuffer", "caffeinate", "npx", "bunx", "pnpx"]);
+const AGENT_PACKAGE = /(^|[/@\\])(anthropic-ai[/\\]claude-code|openai[/\\]codex|github[/\\]copilot)([@/\\]|$)/i;
+
+// Whether a simple command starts an agent session whose prompt could be a reply: one given as an
+// argument that starts with a reply word, or one the rails cannot read (a variable, a substitution,
+// stdin from a pipe, a heredoc or a file). `codex exec "review the diff"` runs.
+function nestedAgent(w) {
+  const { k, name } = head(w);
+  // The program, or the one a runner starts (`timeout 60 claude ...`, `xargs claude ...`).
+  const run = RUNNERS.has(name) ? w.findIndex((x, j) => j > k && !/^-/.test(x.text) && !/^\d+[smhd]?$/.test(x.text)) : k;
+  const at = run >= 0 && AGENT_CLIS.has(programName(w[run].text)) ? run : w.findIndex((x, j) => j >= k && AGENT_PACKAGE.test(x.text));
+  if (at < 0) return false;
+  const args = w.slice(at + 1);
+  if (w.piped || w.fed || args.some((x) => typeof x.redir === "string" && x.redir.startsWith("<"))) return true;
+  return args.some((x) => !x.redir && (REPLY_WORD.test(x.text) || /[$`]/.test(x.text)));
+}
+
 function commandViolation(w, ctx) {
   const { name, args } = head(w);
+  if (nestedAgent(w)) return "agent";
   const flowAt = w.findIndex((x) => programName(x.text) === "flow.mjs");
-  if (flowAt >= 0 && w.slice(flowAt + 1).some((x) => HUMAN_ONLY.has(x.text.toLowerCase()))) return "human";
-  // Code that loads flow.mjs itself could call approve() or answer a gate.
-  if (INTERPRETERS.test(name) && args.some((x) => /flow\.mjs/i.test(x.text) && programName(x.text) !== "flow.mjs")) return "human";
+  if (flowAt >= 0 && w[flowAt + 1]?.text !== "request" && w.slice(flowAt + 1).some((x) => HUMAN_ONLY.has(x.text.toLowerCase()))) return "human";
+  // Code that loads the runtime itself could call approve() or answer a gate.
+  if (INTERPRETERS.test(name) && args.some((x) => namesRuntime(x.text, ctx) && programName(x.text) !== "flow.mjs")) return "human";
   if (name === "git" && subcommand(args) === "clean" && args.some((x) => /^-[a-z]*[xX]/.test(x.text)) && !args.some((x) => /^(-[a-z]*n|--dry-run)$/.test(x.text))) return "clean";
   if (w.some((x) => x.redir && isStateWord(x.text, w.ps, ctx))) return "state";
   if (DATA_PROGRAMS.has(name)) return null;
@@ -160,7 +194,8 @@ const HOOK_CONFIGS = [".claude/settings.json", ".claude/settings.local.json", ".
 export function railsPaths(root, skillDir) {
   const configs = [...HOOK_CONFIGS, ".vscode/settings.json", `.github/hooks/${path.basename(skillDir)}.json`].map((f) => path.join(root, f));
   configs.push(...[".claude/settings.json", ".codex/config.toml", ".copilot/settings.json"].map((f) => path.join(os.homedir(), f)));
-  return { skill: skillDir, configs, state: path.join(root, ".flow") };
+  // Copilot runs every file in .github/hooks/, so a new one is a new hook.
+  return { skill: skillDir, configs, state: path.join(root, ".flow"), hookDir: path.join(root, ".github", "hooks") };
 }
 // Paths compared as the most permissive file system would: any case, either slash.
 export const samePath = (a, b) => norm(a) === norm(b);
@@ -197,7 +232,7 @@ function railsViolation(w, ctx) {
   for (const x of [...named, ...w.slice(0, k)]) {
     if (programName(x.text) === "flow.mjs" || /\s/.test(x.text) || (!x.redir && /^-/.test(x.text) && !/^-[a-z]+:/i.test(x.text))) continue;
     const p = resolve(x.text);
-    if (inside(p, rp.skill) || rp.configs.some((q) => samePath(q, p))) return "rails";
+    if (inside(p, rp.skill) || rp.configs.some((q) => samePath(q, p)) || inside(p, rp.hookDir)) return "rails";
   }
   return null;
 }
@@ -229,23 +264,31 @@ export function shellViolation(command, ps, ctx) {
   if (statePiped) found.add("state");
   if (failed) {
     // Unreadable as shell: fall back to the raw text, conservatively.
-    if (/flow\.mjs["']?\s+(.*\s)?(approve|reject|suspend|unsuspend|hook|mcp)\b/i.test(command)) found.add("human");
+    if (/flow\.mjs["']?\s+(?!\s|request\s)(.*\s)?(approve|reject|suspend|hook|mcp)\b/i.test(command)) found.add("human");
     if (/(^|[\s'"=:(/\\,])\.flow([\\/\s'")]|$)/i.test(command)) found.add("state");
   }
   if (failed && ctx && (/disableAllHooks/i.test(command) || norm(command).includes(norm(path.relative(ctx.root, ctx.skillDir))))) found.add("rails");
-  return ["human", "rails", "clean", "state"].find((v) => found.has(v)) || null;
+  return ["human", "agent", "rails", "clean", "state"].find((v) => found.has(v)) || null;
 }
 
-// Whether an edit of a hook settings file removes a flow.mjs hook or turns hooks off.
+// Whether an edit of a hook settings file changes what the hooks run: removes a flow.mjs hook,
+// turns hooks off, points the agent at other hook files, or adds a command. A command the agent
+// adds would run at the next lifecycle event, outside the tool hook, where it could write the run
+// state or answer a gate. Other settings (permissions, models, editor options) may change.
 export function dropsHooks(abs, act) {
   const { removed, added, whole } = act.change;
-  const off = (t) => DISABLES_HOOKS.test(t) || (/\.toml$/i.test(abs) && TOML_OFF.test(t));
+  const off = (t) => DISABLES_HOOKS.test(t) || HOOK_FILES_SETTING.test(t) || (/\.toml$/i.test(abs) && TOML_OFF.test(t));
   if (off(added) || off(whole ?? "")) return true;
   // A hook command taken out must come back in the same edit: re-indenting or editing next to it is fine.
   const hookCommands = (t) => [...t.matchAll(/[^"'\n]*flow\.mjs[^"'\n]*/g)].map((m) => m[0].trim());
   if (hookCommands(removed).some((c) => !added.includes(c))) return true;
+  if (commands(added).some((c) => !commands(removed).includes(c))) return true;
   if (whole === undefined) return false;
   let before = "";
-  try { before = fs.readFileSync(abs, "utf8"); } catch { return false; }
-  return hookCommands(before).some((c) => !whole.includes(c));
+  try { before = fs.readFileSync(abs, "utf8"); } catch {}
+  return hookCommands(before).some((c) => !whole.includes(c)) || commands(whole).some((c) => !commands(before).includes(c));
 }
+// The commands a settings file runs: values of `command` keys (JSON and TOML), and argument lists.
+const commands = (t) => [...String(t).matchAll(/["']?\b(?:command|bash|powershell|args)["']?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'[^']*'|\[[^\]]*\])/g)].map((m) => m[1]);
+// VS Code loads hook files from the folders this setting lists.
+const HOOK_FILES_SETTING = /hookFilesLocations/i;

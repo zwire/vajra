@@ -15,6 +15,17 @@ const examples = fs.readdirSync(path.join(root, "examples")).filter((d) => fs.st
 const blueprintDir = path.join(skill, "references", "blueprints");
 const blueprints = fs.readdirSync(blueprintDir).filter((f) => f.endsWith(".md") && f !== "README.md").map((f) => f.replace(/\.md$/, ""));
 
+// ---------- runtime ----------
+
+test("RUNTIME lists every file a generated skill must copy, and the modules stay small", () => {
+  const lib = fs.readdirSync(path.join(skill, "scripts", "lib")).filter((f) => f.endsWith(".mjs")).map((f) => `lib/${f}`);
+  assert.deepEqual([...RUNTIME].sort(), ["flow.mjs", "validate.mjs", ...lib].sort());
+  for (const f of lib) {
+    const lines = read(skill, "scripts", f).split("\n").length;
+    assert.ok(lines <= 300, `${f} has ${lines} lines; split it`);
+  }
+});
+
 // ---------- examples ----------
 
 for (const ex of examples) {

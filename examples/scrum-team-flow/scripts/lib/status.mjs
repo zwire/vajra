@@ -20,13 +20,22 @@ export function nextHint(node, run, root) {
 }
 
 export function describe(g, state, root) {
-  if (!g.ok) return `${tag} The workflow graph is invalid, so the rails are off until it validates: ${g.errors[0]}`;
-  if (state.suspended) return `${tag} Rails suspended by the user.`;
+  const text = describeState(g, state, root);
+  if (!state.request || state.suspended) return text;
+  return `${text}\n${tag} Waiting for the user to reply \`suspend\` (or \`reject <reason>\`) to your request to suspend the rails so you can ${state.request.reason}.`;
+}
+
+// How the agent asks to change what only a suspended rail lets it change.
+const askToSuspend = (root, why) => `run \`${flowCmd(root)} request suspend --reason "${why}"\` and ask the user to reply \`suspend\``;
+
+function describeState(g, state, root) {
+  if (!g.ok) return `${tag} The workflow graph is invalid, so the rails are off until it validates: ${g.errors[0]}. To repair the skill, ${askToSuspend(root, "<what you will repair>")}.`;
+  if (state.suspended) return `${tag} Rails suspended by the user: nothing is enforced. When the change that needed it is done, run \`${flowCmd(root)} unsuspend\`.`;
   const run = state.run;
   if (g.unbound.length) {
     const what = g.unbound.map((n) => `${n} (${g.bindings[n] || "not declared in bindings.md"})`).join("; ");
     const guards = g.unboundGuards.length ? ` Guarded commands that use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")} are not recognized either, so ask before anything irreversible.` : "";
-    const note = `${tag} This project has not bound ${what}. The user writes the values in ${g.projectFile}; until then no run can start.${guards}`;
+    const note = `${tag} This project has not bound ${what}. Ask the user for the values, or propose them from the repository; until ${g.projectFile} has them, no run can start. It is part of the rails: to write it, ${askToSuspend(root, "write the project bindings")}.${guards}`;
     if (!run) return note;
     return `${note}\n${describeRun(g, state, root)}`;
   }

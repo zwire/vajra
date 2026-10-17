@@ -1,7 +1,8 @@
 // The opt-in MCP server (stdio, JSON-RPC 2.0, newline-delimited).
 // Tools mirror the agent commands. There is deliberately no tool to approve: at a [human-gate]
 // the server asks the human through MCP elicitation, which the client shows to the user and the
-// model cannot answer. Clients without elicitation fall back to chat or terminal approval.
+// model cannot answer. The same holds for a request to suspend the rails. Clients without
+// elicitation fall back to the chat reply.
 
 import { skillName } from "./env.mjs";
 import { VERSION } from "./contract.mjs";
@@ -18,20 +19,48 @@ const MCP_TOOLS = [
   ["flow_pause", "Pause the run with a handoff note before stopping mid-playbook.", { note: "string" }, ["note"]],
   ["flow_resume", "Resume a paused run.", {}, []],
   ["flow_log", "Show the recent run events.", {}, []],
+  ["flow_request_suspend", "Ask the user to suspend the rails so you can change the workflow's own files or the project bindings. Say what you will change.", { reason: "string" }, ["reason"]],
 ].map(([name, description, props, required]) => ({
   name,
   description,
   inputSchema: { type: "object", properties: Object.fromEntries(Object.entries(props).map(([k, t]) => [k, { type: t }])), required },
 }));
 
-export function serveMcp(root, input = process.stdin, output = process.stdout) {
+// `suspension` is flow.mjs's: suspending works without lib/, so it lives there.
+export function serveMcp(root, suspension, input = process.stdin, output = process.stdout) {
   let clientElicits = false;
   let nextId = 1;
   const pending = new Map();
   const send = (msg) => output.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
   const ask = (method, params) => new Promise((resolve) => { const id = `flow-${nextId++}`; pending.set(id, resolve); send({ id, method, params }); });
 
+  async function requestSuspend(reason) {
+    let r = suspension.request(root, reason);
+    if (r.code === 3 && clientElicits) {
+      const res = await ask("elicitation/create", {
+        mode: "form",
+        message: `${skillName}: suspend the rails so the agent can ${String(reason).trim()}? Nothing is enforced until it turns them back on.`,
+        requestedSchema: {
+          type: "object",
+          properties: {
+            decision: { type: "string", title: "Decision", enum: ["suspend", "keep the rails on"] },
+            note: { type: "string", title: "Note (optional)" },
+          },
+          required: ["decision"],
+        },
+      });
+      // Answered only while that request still waits; the chat may have answered it meanwhile.
+      const state = openStore(root).load();
+      if (!state.request) r = { code: 0, text: `The user already answered in the chat: the rails are ${state.suspended ? "suspended" : "on"}.` };
+      else if (res?.action === "accept" && res.content?.decision === "suspend") r = { code: 0, text: suspension.grant(root, "the user (elicitation)", res.content?.note) };
+      else if (res?.action === "accept" || res?.action === "decline") r = { code: 0, text: suspension.refuse(root, "the user (elicitation)", res.content?.note || "declined") };
+      else r = { code: 3, text: `${r.text}\n(The user dismissed the request; it is still waiting.)` };
+    }
+    return { content: [{ type: "text", text: r.text }], isError: r.code === 1 || r.code === 2 };
+  }
+
   async function callTool(name, a) {
+    if (name === "flow_request_suspend") return requestSuspend(a.reason);
     const cmd = name.replace(/^flow_/, "");
     const pos = cmd === "start" ? [a.playbook] : cmd === "step" ? [String(a.n)] : cmd === "exit" ? [a.to] : [];
     const o = { request: a.request, abandon: a.abandon, evidence: a.evidence, skip: a.skip, because: a.because, note: a.note };

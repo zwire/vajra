@@ -21,6 +21,13 @@ const ACTING_WORD = /write|creat|updat|set|put|post|delet|remov|move|renam|edit|
 const COMMAND_KEY = /^(command|cmd|commandline|command_line|args|argv)$/i;
 const CODE_KEY = /^(code|script|source|program)$/i;
 const MAX_INPUT_DEPTH = 32;
+// Values that a tool may submit as a prompt: a `prompt` (a scheduled or delegated task), or the
+// `message` or `text` of a tool that sends, schedules or starts something. A subagent's prompt
+// (Task, Agent) never reaches the prompt hook.
+const PROMPT_KEY = /^prompt$/i;
+const MESSAGE_KEY = /^(message|text)$/i;
+const SENDS = /send|messag|notif|chat|trigger|cron|schedul|wakeup|loop|session|remote|queue/;
+const SUBAGENT = /^(task|agent)$/;
 
 // An argv array quoted back into one line, so `["bash", "-lc", "x y"]` keeps its script whole.
 const quoteArgv = (c) => c.map((a) => String(a)).map((a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`)).join(" ");
@@ -70,7 +77,7 @@ const shellLine = (name, command) => ({ command, ps: /^(powershell|pwsh)$/.test(
 // What a tool call does, as the hooks check it:
 //   { kind: "shell", lines: [{ command, ps }] }
 //   { kind: "edit", paths, change }       paths empty when the edit names no file the hook can find
-//   { kind: "other", readOnly, lines, code, values }   any other tool, read by its input
+//   { kind: "other", readOnly, lines, code, prompts, values }   any other tool, read by its input
 export function toolAction(input) {
   const name = String(input.tool_name || input.toolName || "").toLowerCase();
   const ti = toolInput(input);
@@ -95,6 +102,7 @@ export function toolAction(input) {
     readOnly: ((t) => READ_ONLY_TOOL.test(t) && !ACTING_WORD.test(t))(name.split(/__|[.:/]/).pop()),
     lines: values.filter((x) => COMMAND_KEY.test(x.key)).map((x) => shellLine(name, x.text)),
     code: values.filter((x) => CODE_KEY.test(x.key)).map((x) => x.text),
+    prompts: SUBAGENT.test(name) ? [] : values.filter((x) => PROMPT_KEY.test(x.key) || (MESSAGE_KEY.test(x.key) && SENDS.test(name))).map((x) => x.text),
     // Every value is checked as a path; prose resolves to no real path, so it does no harm.
     values: values.map((x) => x.text).filter((t) => t && t.length < 4096).map((t) => t.replace(/^file:\/\//i, "")),
   };

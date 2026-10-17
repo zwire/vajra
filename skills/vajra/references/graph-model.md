@@ -102,7 +102,7 @@ deploy: pnpm release
 ---
 ```
 
-The runtime fills the values in before it runs checks, matches guarded commands or limits edits. A list expands an entry into one entry per value (`${code}/**` with two values gives two globs); inside a `/regex/` pattern each value is escaped and a list becomes an alternation; in prose a list reads as `a, b`. Until every binding has a value, `flow start` refuses and the injected context names the missing ones. The project file is part of the rails: the agent changes it only while the human has run `flow suspend`. `flow install` writes a skeleton with each binding's description when the file is missing.
+The runtime fills the values in before it runs checks, matches guarded commands or limits edits. A list expands an entry into one entry per value (`${code}/**` with two values gives two globs); inside a `/regex/` pattern each value is escaped and a list becomes an alternation; in prose a list reads as `a, b`. Until every binding has a value, `flow start` refuses and the injected context names the missing ones. The project file is part of the rails: the agent changes it only while the rails are suspended, which it asks the human for in the chat ([rails.md](rails.md#suspending-the-rails)). `flow install` writes a skeleton with each binding's description when the file is missing.
 
 ## Profile frontmatter
 

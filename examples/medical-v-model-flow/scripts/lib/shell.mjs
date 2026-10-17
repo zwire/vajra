@@ -8,7 +8,8 @@
 // it is read as commands of its own: $(...), `...` and <(...); the script of `sh -c`, `eval`,
 // `ssh`, `watch`, `pwsh -Command`, `pwsh -EncodedCommand`, `cmd /c`, `Invoke-Expression` and
 // `Start-Process`; and heredocs or pipes that feed a shell its script on stdin.
-// Each command is an array of { text, quoted, redir } words; `ps` on the array marks PowerShell.
+// Each command is an array of { text, quoted, redir } words (redir: the operator before a redirected
+// path); `ps` on the array marks PowerShell, `piped` and `fed` that its stdin comes from a pipe or a heredoc.
 
 import { commandMatches } from "./match.mjs";
 
@@ -63,9 +64,10 @@ function decodeEncodedCommand(b64) {
 
 function tokenize(s, ps, nested, bodies) {
   const cmds = [], heredocs = [];
-  let words = [], word = null, redir = false, piped = false;
+  let words = [], word = null, redir = false, piped = false, fed = false;
   const flush = () => { if (word) { words.push(word); word = null; } };
-  const end = (pipe = false) => { flush(); if (words.length) { words.piped = piped; cmds.push(words); } words = []; redir = false; piped = pipe; };
+  // `piped`: stdin comes from the command before; `fed`: from a heredoc.
+  const end = (pipe = false) => { flush(); if (words.length) { words.piped = piped; words.fed = fed; cmds.push(words); } words = []; redir = false; piped = pipe; fed = false; };
   const add = (t, quoted) => { word ||= { text: "", quoted: false, redir }; word.text += t; word.quoted ||= quoted; redir = false; };
   const esc = ps ? "`" : "\\";
   for (let i = 0; i < s.length; i++) {
@@ -134,9 +136,10 @@ function tokenize(s, ps, nested, bodies) {
         const m = s.slice(i + 1).match(/^[ \t]*(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()]+))/);
         if (!m) throw new Error("heredoc without delimiter");
         heredocs.push({ delim: m[1] ?? m[2] ?? m[3], quoted: m[1] !== undefined || m[2] !== undefined || m[0].includes("\\"), tabs: op === "<<-" });
+        fed = true;
         i += m[0].length;
-      } else redir = true;
-    } else if (!ps && c === "&" && s[i + 1] === ">") { flush(); i += s[i + 2] === ">" ? 2 : 1; redir = true; }
+      } else redir = op; // the operator: `<` reads, `>` writes
+    } else if (!ps && c === "&" && s[i + 1] === ">") { flush(); i += s[i + 2] === ">" ? 2 : 1; redir = ">"; }
     else if (c === "|" && s[i + 1] === "|") { end(); i++; }
     else if (c === "|") { end(true); if (s[i + 1] === "&") i++; }
     else if (";&|()".includes(c) || (ps && "{}".includes(c))) end();
@@ -151,11 +154,13 @@ function readShell(s, depth, ps, ctx) {
   const nested = [], bodies = [];
   const out = [];
   for (let w of tokenize(s, ps, nested, bodies)) {
+    // Taken before keywords are dropped: slicing them off makes a new array without these marks.
+    const { piped, fed } = w;
     while (w.length && !w[0].quoted && (ps ? ["&", "."].includes(w[0].text) : KEYWORDS.has(w[0].text))) w = w.slice(1);
     if (!w.length) continue;
-    const piped = w.piped;
     w.ps = ps;
     w.piped = piped;
+    w.fed = fed;
     out.push(w);
     const rest = (k) => w.slice(k).map((x) => x.text).join(" ");
     for (let k = 0; k < w.length; k++) {
