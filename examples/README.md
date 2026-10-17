@@ -6,8 +6,8 @@ Read them for calibration: how concrete a domain model, a step and a "Done when"
 
 | Example | Declaration in short | Style | Facets | Rails | What to look at |
 |---|---|---|---|---|---|
-| [search-ranking-flow](search-ranking-flow/) | Offline experiments on click logs → shadow traffic → A/B ramp with sign-off | Discovery → serving ladder | measured-outcome, data-dependence, stand-in-ladder, resource-budgets | standard | Offline metric and latency budget as checks; held-out week spent once inside the ramp gate; each ramp stage waits for its own approval |
-| [robot-grasp-flow](robot-grasp-flow/) | ROS 2 pick-and-place, Gazebo first, one real arm | Discovery → flow, hardware | physical-world, stand-in-ladder, data-dependence, measured-outcome | strict | Two areas at different resolution; arm launch guarded behind the operator gate; `writes` keeps safety limits out of reach |
+| [search-ranking-flow](search-ranking-flow/) | Offline experiments on click logs → shadow traffic → A/B ramp with sign-off | Discovery → serving ladder | measured-outcome, data-dependence, stand-in-ladder, resource-budgets | standard | Offline metric and latency budget as checks; held-out week spent once inside the ramp gate; the 1% and 50% ramp stages each wait for their own approval |
+| [robot-grasp-flow](robot-grasp-flow/) | ROS 2 pick-and-place, Gazebo first, one real arm | Discovery → flow, hardware | physical-world, stand-in-ladder, data-dependence, measured-outcome | strict | Two areas at different resolution; arm launch guarded behind the operator gate; increment's `writes` leaves the safety limits file out |
 | [scrum-team-flow](scrum-team-flow/) | Two-week sprints, QA sign-off, B2B invoicing with a public API | Sprint | shared-contracts, data-mutation | standard | Auto-triggered router; expand-then-contract API changes; release gate with migration dry run |
 | [medical-v-model-flow](medical-v-model-flow/) | Infusion pump software, IEC 62304 class B | Plan-driven, regulated | reproducibility, external-release, stand-in-ladder | strict | Trace checks route pass and fail mechanically; baseline and release guarded; edits need an active playbook |
 
