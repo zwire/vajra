@@ -102,7 +102,7 @@ deploy: pnpm release
 ---
 ```
 
-The runtime fills the values in before it runs checks, matches guarded commands or limits edits. A list expands an entry into one entry per value (`${code}/**` with two values gives two globs); inside a `/regex/` pattern each value is escaped and a list becomes an alternation; in prose a list reads as `a, b`. Until every binding has a value, `flow start` refuses and the injected context names the missing ones. The project file is part of the rails: the agent changes it only while the human has run `flow suspend`. `flow install` writes a skeleton with each binding's description when the file is missing.
+The runtime fills the values in before it runs checks, matches guarded commands or limits edits. A list expands an entry into one entry per value (`${code}/**` with two values gives two globs); inside a `/regex/` pattern each value is escaped and a list becomes an alternation; in prose a list reads as `a, b`. Until every binding has a value, `flow start` refuses and the injected context names the missing ones. The project file is part of the rails: the agent changes it only while the rails are suspended, which it asks the human for in the chat ([rails.md](rails.md#suspending-the-rails)). `flow install` writes a skeleton with each binding's description when the file is missing.
 
 ## Profile frontmatter
 
@@ -166,7 +166,7 @@ Portability warnings: text in `SKILL.md`, `principles.md`, `profile.md` or a pla
 
 Domain-fit warnings: a work or gate playbook whose "Done when", or all of whose steps, name nothing concrete (no command, path, metric or link); a profile without a `## Domain model`.
 
-Runtime warnings: `scripts/flow.mjs`, `scripts/guard.mjs` or `scripts/validate.mjs` missing, a runtime version different from the validator's, a router that does not mention `scripts/flow.mjs`.
+Runtime warnings: `scripts/flow.mjs`, `scripts/validate.mjs` or a file of `scripts/lib/` missing, a runtime version different from the validator's, a router that does not mention `scripts/flow.mjs`.
 
 Rails warnings: a guarded command that runs in steps behind different gates (ramp stages) and is named in one of them only in prose, or whose earlier step's command also fits a later step's (the runtime tells the stages apart by each step's own backtick command).
 

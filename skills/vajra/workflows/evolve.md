@@ -4,7 +4,7 @@ Change an existing generated skill without losing what already works. Copy these
 
 ## 1. Load the current state
 
-- If the skill's hooks are installed, its own files are protected from the agent. Ask the user to run `node <skill-dir>/scripts/flow.mjs suspend` in their terminal before you edit, and `unsuspend` when you are done.
+- If the skill's hooks are installed, its own files are protected from the agent. Before you edit, run `node <skill-dir>/scripts/flow.mjs request suspend --reason "<the change>"`, say what you will change, and end your turn; the user replies `suspend`. When you are done, run `node <skill-dir>/scripts/flow.mjs unsuspend`.
 - Read the skill's `profile.md`, `SKILL.md`, `bindings.md`, `graph.md`, the playbooks named in the request, and the project file `.flow/<name>/project.md`.
 - Run `node scripts/validate.mjs <skill-dir> --project <project-root>` to confirm the starting point is valid. If it is not, fix the existing errors first and say so.
 - If the validator reports an outdated `schema`, migrate first: apply each step in [../references/graph-model.md](../references/graph-model.md#schema-versions) from the skill's schema up to the current one, then set `schema` and `generator` in `profile.md`. Record the migration in `## History`.
@@ -37,7 +37,7 @@ Re-run only the relevant parts of [../references/composition.md](../references/c
 
 Keep playbook ids stable so existing habits, links and run logs keep working. Keep the skill free of repository values: any new command, path or URL is a binding in `bindings.md` with its value in the project file. When a binding is added, add its value to every project file you know of, or tell the user which projects need it; runs there refuse to start until it is bound. When you remove a playbook, redirect every exit that pointed to it.
 
-Copy `scripts/flow.mjs`, `scripts/guard.mjs` and `scripts/validate.mjs` from this skill over the generated skill's copies so its runtime matches the validator (the validator warns when they differ). If a run is active in `.flow/<name>/`, tell the user: a playbook it points to may have changed.
+Copy `scripts/flow.mjs`, `scripts/validate.mjs` and the whole `scripts/lib/` folder from this skill over the generated skill's copies (delete a leftover `scripts/guard.mjs` from before `lib/`) so its runtime matches the validator (the validator warns when they differ). If a run is active in `.flow/<name>/`, tell the user: a playbook it points to may have changed.
 
 ## 6. Validate, render, dry-run
 

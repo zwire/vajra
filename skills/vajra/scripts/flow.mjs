@@ -17,10 +17,17 @@
 //   flow exit <to> --because "<why its condition holds>"
 //   flow pause --note "<handoff>"  |  flow resume
 //   flow log
-// Human commands (the hooks block the agent from running them):
+//   flow request suspend --reason "<what you need to change>"   ask the user to suspend the rails
+//   flow request cancel                                         withdraw that request
+//   flow unsuspend                                              turn the rails back on
+// The human decides in the chat: they reply `approve` or `reject <reason>` at a [human-gate], and
+// `suspend` (or `reject <reason>`) to a suspend request; the prompt hook records the reply, because
+// only the human writes prompts. With the MCP server, a client that supports elicitation asks them
+// in a dialog instead. Nothing needs a terminal, though these still work in the human's own one
+// (the hooks block the agent from running them):
 //   flow approve [--by <name>] [--note <text>]    resume the interrupted [human-gate]
 //   flow reject --reason <text>                   refuse it
-//   flow suspend  |  flow unsuspend               turn the hooks off and on
+//   flow suspend                                  turn the hooks off until flow unsuspend
 // Integration:
 //   flow hook <session-start|user-prompt|pre-tool-use|stop> [--agent claude|codex|copilot]
 //                                                 lifecycle hook (JSON on stdin)
@@ -28,55 +35,40 @@
 //                [--scope project|local] [--mcp] [--dry-run]
 //                                                 hooks, plus a .flow/<skill>/project.md skeleton
 //                                                 for the skill's bindings when there is none
-//   flow mcp                                      opt-in MCP server over stdio (gates via elicitation)
+//   flow mcp                                      opt-in MCP server over stdio (gates and suspend
+//                                                 requests via elicitation)
 //
 // Exit codes: 0 ok, 1 refused by the graph, 2 usage, 3 interrupted for the human.
 // Environment: FLOW_ROOT (project root), FLOW_SKILL (skill directory; default: the parent of scripts/).
 // Project values: the skill names commands, paths and other repository-specific values as ${name}
 // bindings (declared in its bindings.md); each project gives them in .flow/<skill>/project.md.
-// No dependencies: Node 18+ only. Needs validate.mjs and guard.mjs next to it.
+// No dependencies: Node 18+ only. The runtime lives in lib/ next to this file; this file is its
+// command line and the hooks' entry point, and holds only what must work when lib/ does not load.
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // The rest of the runtime is loaded here rather than imported, so a missing or outdated file is
 // caught and the hook falls back to a plain text check instead of failing (see degradedHook).
-const REQUIRED = {
-  "validate.mjs": ["validateSkill", "commandMatches", "globToRegExp", "readProject", "projectFile", "resolveText", "resolveList", "stepCommands", "fitsStep", "gatesBefore", "VERSION"],
-  "guard.mjs": ["guardMatches", "toolAction", "shellViolation", "dropsHooks", "railsPaths", "inside", "samePath", "codeTouchesRails"],
-};
+const REQUIRED = { "hooks.mjs": ["runHook"], "cli.mjs": ["execute"], "mcp.mjs": ["serveMcp"] };
 let loadError = null;
 const lib = {};
 for (const [file, names] of Object.entries(REQUIRED)) {
   try {
-    const m = await import(`./${file}`);
+    const m = await import(`./lib/${file}`);
     const missing = names.filter((n) => m[n] === undefined);
     if (missing.length) throw new Error(`${file} lacks ${missing.join(", ")}; copy the runtime from vajra again`);
     Object.assign(lib, m);
   } catch (e) { loadError ||= `${file}: ${e.message}`; }
 }
-const { validateSkill, commandMatches, globToRegExp, readProject, projectFile, resolveText, resolveList, stepCommands, fitsStep, gatesBefore, VERSION } = lib;
-const { guardMatches, toolAction, shellViolation, dropsHooks, railsPaths, inside, samePath, codeTouchesRails } = lib;
 
+// The same as lib/env.mjs, repeated so the way out below never depends on lib/.
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(process.env.FLOW_SKILL || path.join(here, ".."));
 const skillName = path.basename(skillDir);
 const tag = `[${skillName}]`;
-const now = () => new Date().toISOString();
-const RESOLVED = new Set(["done", "skipped", "rejected"]);
-
-class Stop extends Error {
-  constructor(message, code = 1) { super(message); this.code = code; }
-}
-const refuse = (msg) => { throw new Stop(msg, 1); };
-// A path relative to the project root, with forward slashes on every platform.
 const relPath = (root, p) => path.relative(root, p).split(path.sep).join("/");
-const railsLevel = (g) => g.profile.rails || "standard";
-
-// ---------- project, graph, state ----------
 
 export function findRoot(start = process.cwd()) {
   if (process.env.FLOW_ROOT) return path.resolve(process.env.FLOW_ROOT);
@@ -90,550 +82,94 @@ export function findRoot(start = process.cwd()) {
   }
 }
 
-// The graph with this project's bindings filled in. Unbound names stay as written (so a `writes`
-// glob matches nothing) and are listed in `unbound`; runs cannot start until the project binds them.
-function loadGraph(root) {
-  const r = validateSkill(skillDir);
-  const file = projectFile(root, skillName);
-  const { values, problems } = readProject(file);
-  const missing = new Set();
-  const nodes = r.nodes.map((n) => ({
-    ...n,
-    checks: resolveList(n.checks, values, missing),
-    writes: n.writes && resolveList(n.writes, values, missing),
-    guards: resolveList(n.guards, values, missing),
-    steps: n.steps.map((s) => ({ ...s, text: resolveText(s.text, values, missing) })),
-    doneWhen: resolveText(n.doneWhen, values, missing),
-    used: n.bindings.map((b) => [b, values.get(b)]),
-  }));
-  // Guarded commands whose binding has no value cannot be recognized; the session is told so.
-  const guardGap = new Set();
-  for (const n of r.nodes) resolveList(n.guards, values, guardGap);
-  for (const name of Object.keys(r.bindings || {})) if (!values.has(name)) missing.add(name);
-  const errors = [...r.errors, ...problems.map((p) => `${path.relative(root, file)}: ${p}`)];
-  return {
-    ok: errors.length === 0, errors, nodes: new Map(nodes.map((n) => [n.id, n])), entries: r.entries, profile: r.profile || {},
-    bindings: r.bindings || {}, unbound: [...missing].sort(), unboundGuards: [...guardGap].sort(), projectFile: relPath(root, file),
-  };
+// The run state, read and written as lib/store.mjs does, for what must work while lib/ is broken:
+// suspending the rails and the degraded hook.
+const stateDir = (root) => path.join(root, ".flow", skillName);
+function loadState(root) {
+  try { return JSON.parse(fs.readFileSync(path.join(stateDir(root), "state.json"), "utf8")); } catch { return { run: null, suspended: false }; }
 }
-
-function openStore(root) {
-  const dir = path.join(root, ".flow", skillName);
+function saveState(root, state, event) {
+  const dir = stateDir(root);
   const file = path.join(dir, "state.json");
-  const ensure = () => fs.mkdirSync(dir, { recursive: true });
-  return {
-    dir,
-    load() {
-      try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return { run: null, suspended: false }; }
-    },
-    save(state) {
-      ensure();
-      fs.writeFileSync(`${file}.tmp`, JSON.stringify(state, null, 2) + "\n");
-      fs.renameSync(`${file}.tmp`, file);
-    },
-    log(event) {
-      ensure();
-      fs.appendFileSync(path.join(dir, "log.jsonl"), JSON.stringify({ at: now(), ...event }) + "\n");
-    },
-    archive(run) {
-      ensure();
-      fs.mkdirSync(path.join(dir, "runs"), { recursive: true });
-      fs.writeFileSync(path.join(dir, "runs", `${run.id}.json`), JSON.stringify(run, null, 2) + "\n");
-    },
-  };
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(`${file}.tmp`, JSON.stringify(state, null, 2) + "\n");
+  fs.renameSync(`${file}.tmp`, file);
+  fs.appendFileSync(path.join(dir, "log.jsonl"), JSON.stringify({ at: new Date().toISOString(), ...event }) + "\n");
 }
 
-function enterPlaybook(node) {
-  return {
-    playbook: node.id,
-    enteredAt: now(),
-    steps: Object.fromEntries(node.steps.map((s) => [s.n, { status: "pending" }])),
-    awaiting: null,
-    checks: null,
-    finished: null,
-  };
-}
-
-const gateText = (s) => s.text.replace(/\[human-gate\]\s*/i, "");
-
-// Earliest [human-gate] before step n that the human has not approved.
-function blockingGate(node, run, n) {
-  for (const s of node.steps) {
-    if (s.n >= n) break;
-    if (s.humanGate && run.steps[s.n]?.status !== "done") return s;
-  }
-  return null;
-}
-
-// The [irreversible] step a guarded command belongs to, so the gates before that step must be
-// approved. When the steps that could own it wait for different gates (a ramp to 1% after one gate,
-// to 50% after another), the command is matched against each step's own command, and of those it
-// fits the one behind the most gates wins, so a later stage never passes on an earlier stage's
-// approval. A command that fits none of them, or that no step names, returns null: the hook refuses
-// it rather than guess.
-function guardedStep(node, run, pat, line) {
-  const irr = node.steps.filter((s) => s.irreversible);
-  const mentions = irr.filter((s) => { try { return commandMatches(pat, s.text); } catch { return false; } });
-  const pool = mentions.length ? mentions : irr;
-  const pick = (list) => list.find((s) => run.steps[s.n]?.status === "pending") || list[list.length - 1];
-  if (new Set(pool.map((s) => gatesBefore(node.steps, s.n))).size <= 1) return pick(pool);
-  if (!mentions.length) return null;
-  const fits = mentions.filter((s) => fitsStep(s, pat, line));
-  if (!fits.length) return null;
-  const most = Math.max(...fits.map((s) => gatesBefore(node.steps, s.n)));
-  return pick(fits.filter((s) => gatesBefore(node.steps, s.n) === most));
-}
-
-function allowedExits(node, run) {
-  if (!run.finished) return [];
-  const result = run.checks && !run.checks.pass ? "fail" : "pass";
-  const exits = node.exits.filter((e) => (e.on || "pass") === result);
-  if (node.terminal && result === "pass" && !exits.some((e) => e.to === "end")) exits.push({ to: "end", when: "the playbook is terminal and its Done when holds" });
-  return exits;
-}
-
-const flowCmd = (root) => {
+// ---------- suspending the rails ----------
+// Suspending turns every hook off, so only the human does it: by replying `suspend` in the chat
+// after the agent asked with `flow request suspend`, through an elicitation dialog, or with
+// `flow suspend` in their own terminal. The reply names the action, so a user who means to pass a
+// gate with `approve` never suspends the rails by mistake, and an agent cannot pass one off as the
+// other. Turning the rails back on only tightens them, so the agent may run `flow unsuspend`.
+// This lives here, not in lib/, because it must work while lib/ is broken: that is when the user
+// most needs to let the agent repair the skill.
+const SUSPEND_REPLY = /^suspend(?:[\s:,.!-]+(.*))?$/is;
+const REJECT_REPLY = /^reject(?:[\s:,.!-]+(.*))?$/is;
+const flowRel = (root) => {
   const rel = relPath(root, path.join(here, "flow.mjs"));
   return `node ${rel.startsWith("..") ? path.join(here, "flow.mjs") : rel}`;
 };
 
-function nextHint(node, run, root) {
-  const f = flowCmd(root);
-  if (run.paused) return `the run is paused (${run.paused.note}); continue with \`${f} resume\``;
-  if (run.awaiting) return `waiting for the human at step ${run.awaiting.step}; stop and ask them. They reply \`approve\` or \`reject <reason>\``;
-  const pending = node.steps.find((s) => run.steps[s.n].status === "pending");
-  if (pending) {
-    return pending.humanGate
-      ? `step ${pending.n} is a human gate: run \`${f} step ${pending.n}\`, then stop and ask the user`
-      : `do step ${pending.n}, then \`${f} step ${pending.n} --evidence "..."\``;
-  }
-  if (!run.finished) return `every step is recorded; run \`${f} finish --evidence "<what proves Done when>"\``;
-  const exits = allowedExits(node, run);
-  if (!exits.length) return `checks failed and no exit handles failure; fix the cause and run \`${f} finish\` again`;
-  return `take one exit: ${exits.map((e) => `\`${f} exit ${e.to} --because "..."\` when ${e.when}`).join("; ")}`;
-}
-
-function describe(g, state, root) {
-  if (!g.ok) return `${tag} The workflow graph is invalid, so the rails are off until it validates: ${g.errors[0]}`;
-  if (state.suspended) return `${tag} Rails suspended by the user.`;
-  const run = state.run;
-  if (g.unbound.length) {
-    const what = g.unbound.map((n) => `${n} (${g.bindings[n] || "not declared in bindings.md"})`).join("; ");
-    const guards = g.unboundGuards.length ? ` Guarded commands that use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")} are not recognized either, so ask before anything irreversible.` : "";
-    const note = `${tag} This project has not bound ${what}. The user writes the values in ${g.projectFile}; until then no run can start.${guards}`;
-    if (!run) return note;
-    return `${note}\n${describeRun(g, state, root)}`;
-  }
-  if (!run) {
-    const how = `match it to a playbook in SKILL.md and run \`${flowCmd(root)} start <playbook> --request "<one line>"\``;
-    // An explicit skill must not pull unrelated work onto its rails; strict rails need a run to edit at all.
-    if (g.profile.invocation === "explicit" && g.profile.rails !== "strict") return `${tag} No playbook is active. Use this workflow only when the user asks for it by name; then ${how}. Other work needs no playbook.`;
-    return `${tag} No playbook is active. To work on a task with this workflow, ${how}.`;
-  }
-  return describeRun(g, state, root);
-}
-
-function describeRun(g, state, root) {
-  const run = state.run;
-  const node = g.nodes.get(run.playbook);
-  const done = node.steps.filter((s) => RESOLVED.has(run.steps[s.n].status)).length;
-  return `${tag} Active playbook: ${node.id} (${done}/${node.steps.length} steps recorded) for "${run.request}". Next: ${nextHint(node, run, root)}.`;
-}
-
-function statusText(g, state, root) {
-  const lines = [describe(g, state, root)];
-  const run = state.run;
-  if (!g.ok || !run) return lines.join("\n");
-  const node = g.nodes.get(run.playbook);
-  lines.push("", `Playbook ${node.id} — ${node.title} (${node.phase} · ${node.lifecycle} · ${node.kind}): playbooks/${node.id}.md`);
-  const mark = { pending: "[ ]", done: "[x]", skipped: "[-]", rejected: "[!]" };
-  for (const s of node.steps) {
-    const st = run.steps[s.n];
-    const waiting = run.awaiting?.step === s.n;
-    const note = waiting ? "  ← waiting for the human" : st.evidence ? `  — ${st.evidence}` : st.reason ? `  — ${st.reason}` : "";
-    lines.push(`  ${waiting ? "[?]" : mark[st.status]} ${s.n}. ${s.text}${note}`);
-  }
-  const bound = node.used.filter(([, v]) => v);
-  if (bound.length) lines.push(`Bindings (from ${g.projectFile}): ${bound.map(([b, v]) => `\${${b}} = ${v.map((x) => `\`${x}\``).join(", ")}`).join("; ")}`);
-  if (node.checks.length) lines.push(`Checks: ${node.checks.map((c) => `\`${c}\``).join(", ")}${run.checks ? ` → ${run.checks.pass ? "pass" : "FAIL"}` : ""}`);
-  lines.push(`Exits: ${node.exits.map((e) => `${e.to}${e.on ? ` [on ${e.on}]` : ""} — ${e.when}`).join("; ") || "(terminal)"}`);
-  if (run.history.length) lines.push(`Path so far: ${run.history.map((h) => h.playbook).join(" → ")} → ${node.id}`);
-  return lines.join("\n");
-}
-
-// ---------- state transitions (shared by CLI and hooks) ----------
-
-function approve(state, by, note) {
-  const run = state.run;
-  if (!run?.awaiting) refuse("no human gate is waiting; the agent reaches it with `flow step <n>` first");
-  const n = run.awaiting.step;
-  run.steps[n] = { status: "done", evidence: `approved by ${by}${note ? `: ${note}` : ""}`, approvedBy: by, at: now() };
-  run.awaiting = null;
-  return n;
-}
-
-function reject(state, by, reason) {
-  const run = state.run;
-  if (!run?.awaiting) refuse("no human gate is waiting");
-  const n = run.awaiting.step;
-  run.steps[n] = { status: "rejected", reason: `rejected by ${by}: ${reason || "no reason given"}`, at: now() };
-  for (const [k, st] of Object.entries(run.steps)) if (Number(k) > n && st.status === "pending") run.steps[k] = { status: "skipped", reason: "gate rejected" };
-  run.awaiting = null;
-  return n;
-}
-
-// ---------- CLI commands ----------
-
-function needRun(state) {
-  if (!state.run) refuse("no playbook is active; start one with `flow start <playbook> --request \"...\"`");
-  return state.run;
-}
-
-function cmdStart(g, state, st, [id], o) {
-  if (!id) throw new Stop("usage: flow start <playbook> --request \"<one line>\"", 2);
-  if (g.unbound.length) refuse(`this project has not bound ${g.unbound.join(", ")}; ask the user to write them in ${g.projectFile} (what each one means is in the skill's bindings.md)`);
-  if (state.run) {
-    if (!o.abandon) refuse(`a run is active (playbook ${state.run.playbook}). Finish it and take an exit, or pass --abandon "<reason>"`);
-    st.log({ event: "abandon", run: state.run.id, playbook: state.run.playbook, reason: o.abandon });
-    st.archive({ ...state.run, abandoned: { reason: o.abandon, at: now() } });
-    state.run = null;
-  }
-  if (!g.nodes.has(id)) refuse(`no playbook "${id}"`);
-  if (!g.entries.includes(id)) refuse(`"${id}" is not a router entry; start at one of: ${g.entries.join(", ")}`);
-  if (!o.request) refuse("--request \"<one line>\" is required: say what this run is for");
-  const node = g.nodes.get(id);
-  state.run = { id: `${now().replace(/[-:]/g, "").replace(/\..*/, "")}-${Math.random().toString(36).slice(2, 6)}`, request: o.request, startedAt: now(), paused: null, history: [], ...enterPlaybook(node) };
-  st.log({ event: "start", run: state.run.id, playbook: id, request: o.request });
-}
-
-function cmdStep(g, state, st, [nArg], o) {
-  const run = needRun(state);
-  if (run.paused) refuse("the run is paused; `flow resume` first");
-  const node = g.nodes.get(run.playbook);
-  const n = Number(nArg);
-  const s = node.steps[n - 1];
-  if (!s) throw new Stop(`usage: flow step <1-${node.steps.length}> --evidence "..." | --skip "..."`, 2);
-  const gate = blockingGate(node, run, n);
-  if (gate) refuse(`step ${gate.n} is a human gate that has not been approved; steps after it wait for the human`);
-  if (s.humanGate) {
-    if (o.skip) refuse("a human gate cannot be skipped");
-    if (run.steps[n].status === "done") refuse(`step ${n} is already approved`);
-    if (run.steps[n].status === "rejected") refuse(`step ${n} was rejected; finish the playbook and take the exit that fits`);
-    run.awaiting = { step: n, since: now() };
-    st.log({ event: "await", run: run.id, playbook: node.id, step: n });
-    throw new Stop(`STOP. Step ${n} is a human gate: "${gateText(s)}"\nPresent what the user needs to decide, then end your turn. Only the user can pass it: they reply \`approve\` (or \`reject <reason>\`), or run \`flow approve\` themselves.`, 3);
-  }
-  if (!o.evidence && !o.skip) throw new Stop(`usage: flow step ${n} --evidence "<what shows it>" | --skip "<reason>"`, 2);
-  run.steps[n] = o.skip ? { status: "skipped", reason: o.skip, at: now() } : { status: "done", evidence: o.evidence, at: now() };
-  if (run.finished) { run.finished = null; run.checks = null; }
-  st.log({ event: o.skip ? "skip" : "step", run: run.id, playbook: node.id, step: n, text: o.skip || o.evidence });
-}
-
-function cmdFinish(g, state, st, _args, o, root) {
-  const run = needRun(state);
-  if (run.paused) refuse("the run is paused; `flow resume` first");
-  if (run.awaiting) refuse(`step ${run.awaiting.step} is waiting for the human`);
-  const node = g.nodes.get(run.playbook);
-  const pending = node.steps.filter((s) => !RESOLVED.has(run.steps[s.n].status));
-  if (pending.length) refuse(`steps ${pending.map((s) => s.n).join(", ")} are not recorded; record each with --evidence or --skip "<reason>"`);
-  if (!o.evidence) refuse("--evidence \"<what proves Done when>\" is required");
-  const results = node.checks.map((cmd) => {
-    const r = spawnSync(cmd, { cwd: root, shell: true, encoding: "utf8", timeout: 15 * 60 * 1000 });
-    const out = `${r.stdout || ""}${r.stderr || ""}`.trim().split("\n").slice(-15).join("\n");
-    return { cmd, code: r.status ?? 1, tail: out };
-  });
-  run.checks = results.length ? { pass: results.every((r) => r.code === 0), results, at: now() } : null;
-  run.finished = { evidence: o.evidence, at: now() };
-  st.log({ event: "finish", run: run.id, playbook: node.id, evidence: o.evidence, checks: results.map(({ cmd, code }) => ({ cmd, code })) });
-  return results.map((r) => `check ${r.code === 0 ? "pass" : "FAIL"}: ${r.cmd}${r.code === 0 ? "" : `\n${r.tail.replace(/^/gm, "    ")}`}`).join("\n");
-}
-
-function cmdExit(g, state, st, [to], o) {
-  const run = needRun(state);
-  if (run.paused) refuse("the run is paused; `flow resume` first");
-  const node = g.nodes.get(run.playbook);
-  if (!run.finished) refuse(`${node.id} is not finished; run \`flow finish --evidence "..."\` first`);
-  const allowed = allowedExits(node, run);
-  const exit = allowed.find((e) => e.to === to);
-  if (!exit) {
-    const why = run.checks && !run.checks.pass ? " (checks failed, so only exits marked `on: fail` are open)" : "";
-    refuse(`"${to}" is not an open exit from ${node.id}${why}. Open exits: ${allowed.map((e) => `${e.to} — ${e.when}`).join("; ") || "none"}`);
-  }
-  if (!o.because) refuse(`--because is required: show why "${exit.when}" holds`);
-  run.history.push({ playbook: node.id, to, when: exit.when, because: o.because, checks: run.checks ? run.checks.pass : null, at: now() });
-  st.log({ event: "exit", run: run.id, from: node.id, to, because: o.because });
-  if (to === "end") {
-    st.archive({ ...run, endedAt: now() });
-    state.run = null;
-    return;
-  }
-  Object.assign(run, enterPlaybook(g.nodes.get(to)));
-}
-
-function cmdLog(st) {
-  const file = path.join(st.dir, "log.jsonl");
-  if (!fs.existsSync(file)) return "(no events yet)";
-  return fs.readFileSync(file, "utf8").trim().split("\n").slice(-40).map((l) => {
-    const e = JSON.parse(l);
-    const { at, event, ...rest } = e;
-    return `${at}  ${event.padEnd(8)} ${Object.entries(rest).map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`).join(" ")}`;
-  }).join("\n");
-}
-
-// ---------- install: hooks and MCP registration per harness ----------
-// The runtime is the same for every agent; only the configuration files differ. Each one runs
-// hook commands with a JSON payload on stdin and reads a JSON deny on stdout.
-// The files are not private to one agent: Copilot CLI (and VS Code's Copilot) also runs the hooks in
-// .claude/settings*.json, without CLAUDE_PROJECT_DIR, and Claude Code and Codex run hooks from
-// wherever the agent is, which may be a subfolder. So the Claude and Codex commands find flow.mjs
-// from the root that node prints (CLAUDE_PROJECT_DIR when Claude Code set it, else git's, else the
-// current folder), which reads the same in sh, bash and PowerShell. Copilot's own file runs from the
-// root (cwd ".").
-const ROOT = `$(node -p "process.env.CLAUDE_PROJECT_DIR||(require('child_process').spawnSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8'}).stdout||'').trim()||'.'")`;
-
-const EVENTS = { "session-start": "SessionStart", "user-prompt": "UserPromptSubmit", "pre-tool-use": "PreToolUse", stop: "Stop" };
-
-const HARNESSES = {
-  claude: {
-    hooks: (scope) => (scope === "local" ? ".claude/settings.local.json" : ".claude/settings.json"),
-    fromRoot: true,
-    entry: (command) => ({ hooks: [{ type: "command", command }] }),
-    mcp: { file: ".mcp.json", format: "json" },
+export const suspension = {
+  // The agent asks; the run waits for the human like a gate (exit code 3).
+  request(root, reason) {
+    const state = loadState(root);
+    if (state.suspended) return { code: 0, text: `${tag} The rails are already suspended. Run \`${flowRel(root)} unsuspend\` when the change is done.` };
+    if (typeof reason !== "string" || !reason.trim()) return { code: 2, text: 'usage: flow request suspend --reason "<what you need to change, and why>"' };
+    state.request = { action: "suspend", reason: reason.trim(), since: new Date().toISOString() };
+    saveState(root, state, { event: "request", action: "suspend", reason: state.request.reason });
+    return { code: 3, text: `STOP. Ask the user to suspend the rails so you can ${state.request.reason}.\nWhile they are suspended nothing is enforced: guarded commands run and every file may change, until you run \`${flowRel(root)} unsuspend\`. Tell the user what you will change, then end your turn. Only the user can allow it: they reply \`suspend\` (or \`reject <reason>\`), or run \`flow suspend\` themselves.` };
   },
-  codex: {
-    hooks: () => ".codex/hooks.json",
-    fromRoot: true,
-    entry: (command) => ({ hooks: [{ type: "command", command }] }),
-    mcp: { file: ".codex/config.toml", format: "toml" },
-    note: "Codex runs project hooks once the project is trusted and you have reviewed the hooks with /hooks.",
+  cancel(root) {
+    const state = loadState(root);
+    if (!state.request) return { code: 0, text: `${tag} No suspend request is waiting.` };
+    const { reason } = state.request;
+    state.request = null;
+    saveState(root, state, { event: "cancel-request", reason });
+    return { code: 0, text: `${tag} The suspend request is withdrawn.` };
   },
-  // Copilot CLI, cloud agent and VS Code all read .github/hooks/*.json. PascalCase event names
-  // select the snake_case payload the hook reads; --agent copilot shapes the output (see runHook).
-  copilot: {
-    hooks: () => `.github/hooks/${skillName}.json`,
-    entry: (command) => ({ type: "command", command, cwd: "." }),
-    version: 1,
-    note: "Copilot CLI runs repository hooks only in a folder you have trusted, and ignores UserPromptSubmit output, so run state is injected only at session start; chat approvals are still recorded.",
+  // The human's answer, from the chat or a dialog. `by` says which.
+  grant(root, by, note) {
+    const state = loadState(root);
+    const reason = state.request?.reason;
+    state.suspended = true;
+    state.request = null;
+    saveState(root, state, { event: "suspend", by, reason, ...(note ? { note } : {}) });
+    return `${tag} The user suspended the rails${reason ? ` so you can ${reason}` : ""}. Do only that, then run \`${flowRel(root)} unsuspend\`.`;
+  },
+  refuse(root, by, why) {
+    const state = loadState(root);
+    const reason = state.request?.reason;
+    state.request = null;
+    saveState(root, state, { event: "reject-request", by, reason, why: why || "no reason given" });
+    return `${tag} The user did not suspend the rails${why ? `: ${why}` : ""}. Carry on without changing the workflow's own files.`;
   },
 };
 
-function readJson(file) {
-  if (!fs.existsSync(file)) return {};
-  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { refuse(`${file} is not valid JSON; fix it first`); }
+// Reads a prompt for an answer to a waiting suspend request. Returns a note for the agent, and
+// whether the prompt was the answer (so it is not read again as an answer to a gate).
+function answerFromChat(root, prompt) {
+  const state = loadState(root);
+  if (!state.request || state.suspended) return { note: "", used: false };
+  const p = prompt.trim();
+  const yes = p.match(SUSPEND_REPLY);
+  if (yes) return { note: suspension.grant(root, "the user (chat)", (yes[1] || "").trim()), used: true };
+  // While a gate waits too, `approve` and `reject` answer the gate.
+  if (state.run?.awaiting) return { note: "", used: false };
+  const no = p.match(REJECT_REPLY);
+  if (no) return { note: suspension.refuse(root, "the user (chat)", (no[1] || "").trim()), used: true };
+  if (/^approve\b/i.test(p)) return { note: `${tag} The user replied \`approve\`, but the rails are suspended only by the reply \`suspend\`, so they are still on. If you still need it, say what you will change and ask again.`, used: true };
+  return { note: "", used: false };
 }
 
-function install(root, o) {
-  const names = String(o.harness || "").split(",").map((x) => x.trim()).filter(Boolean);
-  if (!names.length || names.some((n) => !HARNESSES[n])) throw new Stop(`--harness must list one or more of: ${Object.keys(HARNESSES).join(", ")}`, 2);
-  const scope = o.scope || "project";
-  if (!["project", "local"].includes(scope)) throw new Stop("--scope must be project or local", 2);
-  const script = path.join(here, "flow.mjs");
-  const rel = relPath(root, script);
-  const inRoot = !rel.startsWith("..") && !path.isAbsolute(rel);
-  const writes = new Map();
-  const report = [];
-  const load = (file) => (writes.has(file) ? writes.get(file) : readJson(path.join(root, file)));
+// ---------- hook answers, in the fields each agent reads ----------
 
-  // This skill's hook commands in any form an earlier install wrote; they are replaced, not added to.
-  const ours = (c) => typeof c === "string" && /flow\.mjs["']?\s+hook\s/.test(c) && (c.includes(rel) || c.includes(script));
-
-  for (const name of names) {
-    const h = HARNESSES[name];
-    const target = !inRoot ? JSON.stringify(script) : h.fromRoot ? `"${ROOT}/${rel}"` : JSON.stringify(rel);
-    const file = h.hooks(scope);
-    const cfg = load(file);
-    if (h.version) cfg.version ||= h.version;
-    const events = (cfg.hooks ||= {});
-    const changed = [];
-    for (const [ev, native] of Object.entries(EVENTS)) {
-      const entry = h.entry(`node ${target} hook ${ev} --agent ${name}`);
-      const before = JSON.stringify(events[native] || []);
-      const list = (events[native] || [])
-        .map((x) => (x.hooks ? { ...x, hooks: x.hooks.filter((y) => !ours(y.command)) } : x))
-        .filter((x) => !ours(x.command) && !(x.hooks && !x.hooks.length));
-      list.push(entry);
-      events[native] = list;
-      if (!before.includes(JSON.stringify(entry))) changed.push(native);
-    }
-    writes.set(file, cfg);
-    report.push(`${name}: ${changed.length ? `hooks ${changed.join(", ")} written` : "hooks already present"} in ${file}${h.note ? ` (${h.note})` : ""}`);
-
-    // MCP is opt-in: tool schemas cost context in every session, and only elicitation adds
-    // something the CLI and hooks do not.
-    if (!o.mcp) continue;
-    if (!h.mcp) { report.push(`${name}: MCP registration is not automated; register \`node ${inRoot ? rel : script} mcp\` in its MCP settings by hand`); continue; }
-    const server = { command: "node", args: [inRoot ? rel : script, "mcp"] };
-    if (h.mcp.format === "json") {
-      const m = load(h.mcp.file);
-      m.mcpServers ||= {};
-      const fresh = !m.mcpServers[skillName];
-      m.mcpServers[skillName] ||= server;
-      writes.set(h.mcp.file, m);
-      report.push(`${name}: MCP server "${skillName}" ${fresh ? "registered" : "already registered"} in ${h.mcp.file}`);
-    } else {
-      const file = path.join(root, h.mcp.file);
-      const text = writes.get(h.mcp.file) ?? (fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "");
-      const header = `[mcp_servers.${JSON.stringify(skillName)}]`;
-      const fresh = !text.includes(header);
-      writes.set(h.mcp.file, fresh ? `${text}${text && !text.endsWith("\n") ? "\n" : ""}\n${header}\ncommand = "node"\nargs = ${JSON.stringify(server.args)}\n` : text);
-      report.push(`${name}: MCP server "${skillName}" ${fresh ? "registered" : "already registered"} in ${h.mcp.file}`);
-    }
-  }
-
-  // The project's values for the skill's bindings: a skeleton the user fills in, never overwritten.
-  const proj = relPath(root, projectFile(root, skillName));
-  const declared = Object.entries(loadGraph(root).bindings);
-  if (declared.length && !fs.existsSync(path.join(root, proj))) {
-    writes.set(proj, [
-      "---",
-      `# Values of ${skillName}'s bindings for this repository (see the skill's bindings.md).`,
-      "# A value is a string, or a list [a, b] for several globs or commands. Empty means unbound.",
-      ...declared.flatMap(([k, d]) => [`# ${d}`, `${k}: ""`]),
-      "---",
-      "",
-      "# Project notes",
-      "",
-      "Facts about this repository the workflow relies on: toolchain, where data and artifacts live, who approves what.",
-      "",
-    ].join("\n"));
-    report.push(`project: wrote ${proj}; fill in every value before the first run`);
-  }
-
-  const out = [];
-  for (const [file, content] of writes) {
-    const text = typeof content === "string" ? content : JSON.stringify(content, null, 2) + "\n";
-    if (o["dry-run"]) out.push(`--- ${file}\n${text}`);
-    else { fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); fs.writeFileSync(path.join(root, file), text); }
-  }
-  if (o["dry-run"]) return out.join("\n");
-  return `${report.join("\n")}\nRun state lives in .flow/${skillName}/. Commit ${proj}; commit the rest for an audit trail, or ignore .flow/*/state.json, .flow/*/log.jsonl and .flow/*/runs/.`;
-}
-
-// ---------- lifecycle hooks (tool-agnostic) ----------
-// What a tool call does and whether it touches the rails is read in guard.mjs.
-
-
-const RAILS_MSG = "the workflow's own rules (its playbooks, profile and scripts) and the hooks that enforce them change only while the user has suspended the rails. Stop and ask the user to run `flow suspend` first.";
-
-const STATE_MSG = "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
-const SHELL_MSG = {
-  human: "only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.",
-  rails: RAILS_MSG,
-  complex: "this command nests shells or scripts too deeply for the rails to check. Run it as simpler, separate commands.",
-  clean: "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.",
-  state: STATE_MSG,
-};
-const DELETING_TOOL = /delete|remove|rm|move|rename|clean|purge|unlink|trash/;
-
-// Checks that protect the rails themselves: the run state, the project bindings, the skill, the
-// hook settings and the human-only commands. They need no graph, so they hold even while the
-// graph is invalid.
-function railsCheck(act, g, root, cwd) {
-  const rp = railsPaths(root, skillDir);
-  const ctx = { root, cwd, skillDir };
-  const pathCheck = (abs, change) => {
-    const rel = relPath(root, abs);
-    if (samePath(rel, g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the user has suspended the rails. Stop and ask the user to run \`flow suspend\` first, or to edit the file themselves.`;
-    if (/^\.flow(\/|$)/i.test(rel)) return "the run state is written only by flow.mjs.";
-    if (inside(abs, rp.skill)) return RAILS_MSG;
-    if (rp.configs.some((q) => samePath(q, abs)) && (!change || dropsHooks(abs, { change }))) return RAILS_MSG;
-    return null;
-  };
-  if (act.kind === "edit") {
-    if (!act.paths.length) return "this edit names no file the rails can find, so it cannot be checked. Use the agent's own edit or write tool with a file path.";
-    for (const fp of act.paths) { const r = pathCheck(path.resolve(cwd, fp), act.change); if (r) return r; }
-    return null;
-  }
-  for (const line of act.lines || []) {
-    const v = shellViolation(line.command, line.ps, ctx);
-    if (v) return SHELL_MSG[v];
-  }
-  if (act.kind !== "other" || act.readOnly) return null;
-  if (act.code.some((c) => codeTouchesRails(c, ctx))) return `${STATE_MSG} The same holds for the workflow's own files and hook settings.`;
-  const deletes = DELETING_TOOL.test(act.name);
-  for (const t of act.values) {
-    const abs = path.resolve(cwd, t.replace(/^~(?=\/|\\|$)/, os.homedir()));
-    // An unknown tool may write any path it is given, and one that deletes takes what is below it.
-    const r = pathCheck(abs, null) || (deletes && [rp.state, rp.skill, ...rp.configs].some((q) => inside(q, abs)) ? RAILS_MSG : null);
-    if (r) return r;
-  }
-  return null;
-}
-
-function preToolUse(g, state, input, root) {
-  const rails = railsLevel(g);
-  if (state.suspended || (g.ok && rails === "advisory")) return null;
-  const act = toolAction(input);
-  const cwd = input.cwd || root;
-  const own = railsCheck(act, g, root, cwd);
-  if (own || !g.ok) return own;
-  const run = state.run;
-  const f = flowCmd(root);
-
-  if (act.kind === "edit") {
-    for (const fp of act.paths) {
-      const rel = relPath(root, path.resolve(cwd, fp));
-      if (rel.startsWith("..")) continue;
-      if (!run) { if (rails === "strict") return `no playbook is active, so edits are blocked. Match the task to a playbook and run \`${f} start <playbook> --request "..."\`.`; continue; }
-      if (run.paused && rails === "strict") return `the run is paused; \`${f} resume\` before editing.`;
-      if (run.paused) continue; // a paused run leaves the agent free for other work; guarded commands stay blocked
-      const node = g.nodes.get(run.playbook);
-      if (node.writes && !node.writes.some((w) => globToRegExp(w).test(rel))) {
-        return `playbook ${node.id} ${node.writes.length ? `may only write ${node.writes.join(", ")}; ${rel} is outside` : `is read-only (\`writes: []\`), so it may not edit ${rel}`}. Finish the playbook and take an exit to one that owns this path.`;
-      }
-    }
-    return null;
-  }
-
-  for (const { command: cmd, ps } of act.lines || []) {
-    // Several playbooks may guard the same command; it runs only inside one of them.
-    const owners = [...g.nodes.values()].map((node) => [node, node.guards.filter((pat) => guardMatches(pat, cmd, { ps }))]).filter(([, pats]) => pats.length);
-    if (!owners.length) continue;
-    const own = run && owners.find(([node]) => node.id === run.playbook);
-    if (!own) {
-      const ids = owners.map(([node]) => node.id).join(" or ");
-      return `\`${owners[0][1][0]}\` is irreversible and runs only inside playbook ${ids}, after its human gate. Current playbook: ${run ? run.playbook : "none"}.`;
-    }
-    if (run.paused) return "the run is paused.";
-    const [node, pats] = own;
-    for (const pat of pats) {
-      const step = guardedStep(node, run, pat, cmd);
-      if (!step) {
-        const forms = node.steps.filter((s) => s.irreversible).flatMap((s) => stepCommands(s, pat).map((x) => `step ${s.n}: \`${x}\``));
-        return forms.length
-          ? `\`${pat}\` runs in more than one step of ${node.id}, behind different gates, and this command matches none of them, so the rails cannot tell which gate it needs. Write it as its step does (${forms.join("; ")}).`
-          : `\`${pat}\` is guarded in ${node.id}, but no step names it, so the rails cannot tell which gate it needs. Stop and ask the user; the playbook should name the command in its [irreversible] step.`;
-      }
-      const gate = blockingGate(node, run, step.n);
-      if (gate) return `\`${pat}\` belongs to step ${step.n} and step ${gate.n} [human-gate] is not approved. Run \`${f} step ${gate.n}\`, then stop and ask the user.`;
-    }
-  }
-  return null;
-}
-
-// A fingerprint of the run's progress: a stop is bounced once per fingerprint, so the agent is
-// nudged after real progress but never trapped, whatever loop guard the harness provides.
-const progress = (run) => JSON.stringify([run.playbook, run.steps, !!run.finished]);
-
-function stopCheck(g, state, input, root) {
-  const rails = railsLevel(g);
-  const run = state.run;
-  if (!g.ok || state.suspended || rails === "advisory" || !run || input.stop_hook_active || run.paused || run.awaiting) return null;
-  if (run.nudged === progress(run)) return null;
-  const node = g.nodes.get(run.playbook);
-  const f = flowCmd(root);
-  const pending = node.steps.filter((s) => run.steps[s.n].status === "pending");
-  const where = pending.length
-    ? `playbook ${node.id} is in progress; step${pending.length > 1 ? "s" : ""} ${pending.map((s) => s.n).join(", ")} not recorded`
-    : !run.finished ? `playbook ${node.id} has every step recorded but is not finished` : `playbook ${node.id} is finished but no exit was taken`;
-  run.nudged = progress(run);
-  return `${where}. Next: ${nextHint(node, run, root)}. If you must stop (for example to ask the user something), run \`${f} pause --note "<why>"\` first.`;
-}
-
-function context(input, text, format) {
+function context(eventName, text, format) {
   // hookSpecificOutput.additionalContext is understood by the agents that inject hook context.
   // Copilot CLI reads only a top-level additionalContext; VS Code reads hookSpecificOutput.
-  const out = { hookSpecificOutput: { hookEventName: input.hook_event_name || "SessionStart", additionalContext: text } };
+  const out = { hookSpecificOutput: { hookEventName: eventName, additionalContext: text } };
   return JSON.stringify(format === "copilot" ? { additionalContext: text, ...out } : out);
 }
 
@@ -644,45 +180,12 @@ function blockTool(reason) {
   return 0;
 }
 
-function runHook(event, input, root, format) {
-  const g = loadGraph(root);
-  const st = openStore(root);
-  const state = st.load();
-  if (event === "session-start") { console.log(context(input, describe(g, state, root), format)); return 0; }
-  if (event === "user-prompt") {
-    const p = String(input.prompt ?? input.user_prompt ?? input.message ?? "").trim();
-    let note = "";
-    if (g.ok && state.run?.awaiting && !state.suspended) {
-      // Only a message that starts with the bare word counts; "approve?" or "approved by whom" do not.
-      const ok = p.match(/^approve(?:[\s:,.!-]+(.*))?$/is);
-      const no = p.match(/^reject(?:[\s:,.!-]+(.*))?$/is);
-      if (ok || no) {
-        const n = ok ? approve(state, "the user (chat)", (ok[1] || "").trim()) : reject(state, "the user (chat)", (no[1] || "").trim());
-        st.save(state);
-        st.log({ event: ok ? "approve" : "reject", run: state.run.id, playbook: state.run.playbook, step: n, by: "user-prompt", text: p.slice(0, 200) });
-        note = `${tag} The user ${ok ? "approved" : "rejected"} step ${n} of ${state.run.playbook}.\n`;
-      }
-    }
-    // Without a run there is nothing to track on every prompt; session start already said how to begin.
-    if (!note && g.ok && !state.run && !state.suspended && railsLevel(g) !== "strict") return 0;
-    console.log(context(input, note + describe(g, state, root), format));
-    return 0;
-  }
-  if (event === "pre-tool-use") {
-    const reason = preToolUse(g, state, input, root);
-    if (!reason) return 0;
-    st.log({ event: "block-tool", tool: input.tool_name, reason });
-    return blockTool(reason);
-  }
-  if (event === "stop") {
-    const reason = stopCheck(g, state, input, root);
-    if (!reason) return 0;
-    st.save(state);
-    st.log({ event: "block-stop", reason });
-    console.log(JSON.stringify({ decision: "block", reason: `${tag} ${reason}` }));
-    return 0;
-  }
-  console.error(`unknown hook event "${event}"`);
+function answer(v, format) {
+  if (!v) return 0;
+  if (v.deny) return blockTool(v.deny);
+  if (v.block) console.log(JSON.stringify({ decision: "block", reason: `${tag} ${v.block}` }));
+  else if (v.context !== undefined) console.log(context(v.event, v.context, format));
+  else if (v.unknown !== undefined) console.error(`unknown hook event "${v.unknown}"`);
   return 0;
 }
 
@@ -690,18 +193,35 @@ function runHook(event, input, root, format) {
 // all work, nor let the rails be changed. It blocks only calls whose text names the workflow's own
 // files or the hook settings, which a plain search finds without understanding the call.
 const NAMES_RAILS = /\.flow\b|flow\.mjs|\.claude[\\/]|\.codex[\\/]|\.github[\\/](hooks|copilot)|\.vscode[\\/]settings|disableAllHooks|useHooks/i;
+const METADATA = /^(session|transcript|cwd|permission|hook_?event|timestamp|model|turn)/i;
+const NAMES_REPLY = /(^|[^\w-])(approve|reject|suspend)(?![\w-])/i;
+const NAMES_PROMPT = /\b(claude|codex|copilot)\b|"(prompt|message|text)"\s*:/i;
+// The one call that names flow.mjs and still goes through: asking to suspend the rails (or turning
+// them back on), written plainly, so the agent can ask the user to let it repair the skill.
+const FLOW_PATH = `(?:"[^"\`$]*flow\\.mjs"|'[^']*flow\\.mjs'|[^\\s"'\`$;&|<>()]*flow\\.mjs)`;
+const ASK_TO_REPAIR = new RegExp(`^\\s*node\\s+${FLOW_PATH}\\s+(?:unsuspend|request\\s+cancel|request\\s+suspend\\s+--reason\\s+(?:"[^"\`$\\\\]*"|'[^']*'))\\s*$`);
 
-function degradedHook(event, e, text, root, format) {
+function degradedHook(event, e, input, raw, root, format, note = "") {
   let suspended = false;
-  try { suspended = JSON.parse(fs.readFileSync(path.join(openStore(root).dir, "state.json"), "utf8")).suspended === true; } catch {}
+  try { suspended = JSON.parse(fs.readFileSync(path.join(stateDir(root), "state.json"), "utf8")).suspended === true; } catch {}
   if (event === "pre-tool-use") {
+    const ti = input.tool_input && typeof input.tool_input === "object" ? input.tool_input : null;
+    const asks = typeof ti?.command === "string" && ASK_TO_REPAIR.test(ti.command);
+    // What the call does, without the payload's metadata: Claude Code's transcript_path lies under
+    // ~/.claude/, which would make every call look like it names the rails.
+    const call = Object.fromEntries(Object.entries(input).filter(([k]) => !METADATA.test(k)));
+    const text = Object.keys(input).length ? JSON.stringify(asks ? { ...call, tool_input: { ...ti, command: "" } } : call) : raw;
     const t = text.replace(/\\\\/g, "/");
     const rel = relPath(root, skillDir);
-    if (suspended || !(NAMES_RAILS.test(t) || (rel && t.includes(rel)))) return 0;
-    return blockTool(`the rails could not read this call (${e.message}), and it names the workflow's own files. Stop and ask the user.`);
+    if (suspended) return 0;
+    if (NAMES_RAILS.test(t) || (rel && t.includes(rel))) return blockTool(`the rails could not read this call (${e.message}), and it names the workflow's own files. Stop and ask the user.`);
+    // A prompt for another agent session, or one scheduled or sent, could reply in the user's place.
+    if (NAMES_REPLY.test(t) && NAMES_PROMPT.test(t)) return blockTool(`the rails could not read this call (${e.message}), and it may hand an agent a prompt that answers in the user's place. Stop and ask the user.`);
+    return 0;
   }
-  if ((event === "session-start" || event === "user-prompt") && !suspended) {
-    console.log(context({ hook_event_name: event === "user-prompt" ? "UserPromptSubmit" : "SessionStart" }, `${tag} The rails are degraded (${e.message}): only calls that name the workflow's own files are blocked. Tell the user, who can copy the runtime from vajra again or run \`flow suspend\`.`, format));
+  if ((event === "session-start" || event === "user-prompt") && (note || !suspended)) {
+    const degraded = suspended ? "" : `${tag} The rails are degraded (${e.message}): only calls that name the workflow's own files are blocked. Tell the user, who can copy the runtime from vajra again. To repair it yourself, run \`${flowRel(root)} request suspend --reason "<what you will repair>"\` and ask the user to reply \`suspend\`.`;
+    console.log(context(event === "user-prompt" ? "UserPromptSubmit" : "SessionStart", [note, degraded].filter(Boolean).join("\n"), format));
   }
   return 0;
 }
@@ -721,134 +241,6 @@ function parseArgs(argv) {
     } else pos.push(a);
   }
   return { pos, o };
-}
-
-// Run one command against fresh state. Returns { code, text }; never prints.
-export function execute(cmd, pos = [], o = {}, root = findRoot()) {
-  const st = openStore(root);
-  const state = st.load();
-  const g = loadGraph(root);
-  try {
-    if (cmd === "install") return { code: 0, text: install(root, o) };
-    if (cmd === "log") return { code: 0, text: cmdLog(st) };
-    if (cmd === "status") return { code: 0, text: o.json ? JSON.stringify({ skill: skillName, ok: g.ok, errors: g.errors, ...state }, null, 2) : statusText(g, state, root) };
-    if (!g.ok) refuse(`the workflow graph is invalid; fix it before running:\n${g.errors.join("\n")}`);
-    let extra = "";
-    switch (cmd) {
-      case "start": cmdStart(g, state, st, pos, o); break;
-      case "step": try { cmdStep(g, state, st, pos, o); } finally { st.save(state); } break;
-      case "finish": extra = cmdFinish(g, state, st, pos, o, root); break;
-      case "exit": cmdExit(g, state, st, pos, o); break;
-      case "pause": needRun(state).paused = { note: o.note || "no note", at: now() }; st.log({ event: "pause", run: state.run.id, note: o.note }); break;
-      case "resume": needRun(state).paused = null; st.log({ event: "resume", run: state.run.id }); break;
-      case "approve": { const n = approve(state, o.by || os.userInfo().username, o.note); st.log({ event: "approve", run: state.run.id, step: n, by: o.by || "cli" }); break; }
-      case "reject": { const n = reject(state, o.by || os.userInfo().username, o.reason); st.log({ event: "reject", run: state.run.id, step: n, reason: o.reason }); break; }
-      default: throw new Stop(`unknown command "${cmd}"; run \`flow help\``, 2);
-    }
-    st.save(state);
-    return { code: 0, text: [extra, statusText(g, state, root)].filter(Boolean).join("\n") };
-  } catch (e) {
-    if (!(e instanceof Stop)) throw e;
-    return { code: e.code, text: e.code === 3 ? e.message : `REFUSED: ${e.message}` };
-  }
-}
-
-// ---------- MCP server (stdio, JSON-RPC 2.0, newline-delimited) ----------
-// Tools mirror the agent commands. There is deliberately no tool to approve: at a [human-gate]
-// the server asks the human through MCP elicitation, which the client shows to the user and the
-// model cannot answer. Clients without elicitation fall back to chat or terminal approval.
-
-const MCP_TOOLS = [
-  ["flow_status", "Show the active playbook, its steps, checks, open exits and the next move.", {}, []],
-  ["flow_start", "Start a run at a router entry playbook.", { playbook: "string", request: "string", abandon: "string" }, ["playbook", "request"]],
-  ["flow_step", "Record step n with evidence, or skip it with a reason. On a [human-gate] step, asks the human.", { n: "integer", evidence: "string", skip: "string" }, ["n"]],
-  ["flow_finish", "Finish the playbook: needs every step recorded; runs its checks and lists the open exits.", { evidence: "string" }, ["evidence"]],
-  ["flow_exit", "Take an open exit; the next playbook starts.", { to: "string", because: "string" }, ["to", "because"]],
-  ["flow_pause", "Pause the run with a handoff note before stopping mid-playbook.", { note: "string" }, ["note"]],
-  ["flow_resume", "Resume a paused run.", {}, []],
-  ["flow_log", "Show the recent run events.", {}, []],
-].map(([name, description, props, required]) => ({
-  name,
-  description,
-  inputSchema: { type: "object", properties: Object.fromEntries(Object.entries(props).map(([k, t]) => [k, { type: t }])), required },
-}));
-
-export function serveMcp(input = process.stdin, output = process.stdout) {
-  let clientElicits = false;
-  let nextId = 1;
-  const pending = new Map();
-  const send = (msg) => output.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
-  const ask = (method, params) => new Promise((resolve) => { const id = `flow-${nextId++}`; pending.set(id, resolve); send({ id, method, params }); });
-
-  async function callTool(name, a) {
-    const cmd = name.replace(/^flow_/, "");
-    const pos = cmd === "start" ? [a.playbook] : cmd === "step" ? [String(a.n)] : cmd === "exit" ? [a.to] : [];
-    const o = { request: a.request, abandon: a.abandon, evidence: a.evidence, skip: a.skip, because: a.because, note: a.note };
-    for (const k of Object.keys(o)) if (o[k] === undefined) delete o[k];
-    let r = execute(cmd, pos, o);
-    if (r.code === 3 && clientElicits) {
-      const res = await ask("elicitation/create", {
-        mode: "form",
-        message: `${skillName}: ${r.text.split("\n")[0].replace(/^STOP\. /, "")}`,
-        requestedSchema: {
-          type: "object",
-          properties: {
-            decision: { type: "string", title: "Decision", enum: ["approve", "reject"] },
-            note: { type: "string", title: "Note (optional)" },
-          },
-          required: ["decision"],
-        },
-      });
-      const root = findRoot();
-      const st = openStore(root);
-      const state = st.load();
-      const decided = res?.action === "accept" ? res.content?.decision : res?.action === "decline" ? "reject" : null;
-      if (decided && state.run?.awaiting) {
-        const n = decided === "approve" ? approve(state, "the user (elicitation)", res.content?.note) : reject(state, "the user (elicitation)", res.content?.note || "declined");
-        st.save(state);
-        st.log({ event: decided, run: state.run.id, playbook: state.run.playbook, step: n, by: "elicitation" });
-        r = { code: 0, text: `The user ${decided === "approve" ? "approved" : "rejected"} step ${n}.\n${execute("status").text}` };
-      } else r = { code: 3, text: `${r.text}\n(The user dismissed the request; the gate is still waiting.)` };
-    }
-    return { content: [{ type: "text", text: r.text }], isError: r.code === 1 || r.code === 2 };
-  }
-
-  async function handle(msg) {
-    if (msg.id !== undefined && !msg.method) { const res = pending.get(msg.id); pending.delete(msg.id); res?.(msg.result); return; }
-    const { id, method, params = {} } = msg;
-    try {
-      if (method === "initialize") {
-        clientElicits = !!params.capabilities?.elicitation;
-        return send({ id, result: {
-          protocolVersion: params.protocolVersion || "2025-06-18",
-          capabilities: { tools: {} },
-          serverInfo: { name: skillName, version: VERSION },
-          instructions: `Drive every run of the ${skillName} workflow through these tools: flow_start, flow_step, flow_finish, flow_exit. Call flow_status whenever unsure.`,
-        } });
-      }
-      if (method === "ping") return send({ id, result: {} });
-      if (method === "tools/list") return send({ id, result: { tools: MCP_TOOLS } });
-      if (method === "tools/call") return send({ id, result: await callTool(params.name, params.arguments || {}) });
-      if (id !== undefined) send({ id, error: { code: -32601, message: `method not found: ${method}` } });
-    } catch (e) {
-      if (id !== undefined) send({ id, error: { code: -32603, message: String(e.message || e) } });
-    }
-  }
-
-  let buf = "";
-  input.setEncoding("utf8");
-  input.on("data", (chunk) => {
-    buf += chunk;
-    let i;
-    while ((i = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, i).trim();
-      buf = buf.slice(i + 1);
-      if (!line) continue;
-      let msg;
-      try { msg = JSON.parse(line); } catch { send({ id: null, error: { code: -32700, message: "parse error" } }); continue; }
-      handle(msg);
-    }
-  });
 }
 
 // ---------- main ----------
@@ -878,32 +270,50 @@ export function main(argv) {
         if (own.includes(`hook ${rest[0]} `)) return 0;
       }
     }
+    // A reply to a suspend request is read before anything else, so it works with lib/ broken.
+    let note = "";
+    if (rest[0] === "user-prompt") {
+      try {
+        const r = answerFromChat(root, String(input.prompt ?? input.user_prompt ?? input.message ?? ""));
+        note = r.note;
+        if (r.used) input = { ...input, prompt: "", user_prompt: "", message: "" };
+      } catch {}
+    }
     try {
       if (loadError) throw new Error(`the runtime did not load: ${loadError}`);
-      return runHook(rest[0], input, root, format);
+      const v = lib.runHook(rest[0], input, root);
+      if (!note) return answer(v, format);
+      return answer({ context: [note, v?.context].filter(Boolean).join("\n"), event: v?.event || input.hook_event_name || "UserPromptSubmit" }, format);
     } catch (e) {
-      return degradedHook(rest[0], e, Object.keys(input).length ? JSON.stringify(input) : raw, root, format);
+      return degradedHook(rest[0], e, input, raw, root, format, note);
     }
   }
-  // The user's way out works even when the runtime or the workflow graph is broken.
+  // The way out works even when the runtime or the workflow graph is broken.
+  if (cmd === "request") {
+    const { pos, o } = parseArgs(rest);
+    const root = findRoot();
+    const r = pos[0] === "suspend" ? suspension.request(root, o.reason) : pos[0] === "cancel" ? suspension.cancel(root) : { code: 2, text: 'usage: flow request suspend --reason "<what you need to change>"  |  flow request cancel' };
+    (r.code === 1 || r.code === 2 ? console.error : console.log)(r.text);
+    return r.code;
+  }
   if (cmd === "suspend" || cmd === "unsuspend") {
-    const st = openStore(findRoot());
-    const state = st.load();
+    const root = findRoot();
+    const state = loadState(root);
     state.suspended = cmd === "suspend";
-    st.save(state);
-    st.log({ event: cmd });
+    if (state.suspended) state.request = null;
+    saveState(root, state, { event: cmd });
     console.log(`${tag} ${state.suspended ? "Rails suspended: the hooks allow everything until flow unsuspend." : "Rails back on."}`);
     return 0;
   }
   if (loadError) { console.error(`${tag} the runtime did not load: ${loadError}`); return 1; }
-  if (cmd === "mcp") { serveMcp(); return undefined; }
+  if (cmd === "mcp") { lib.serveMcp(findRoot(), suspension); return undefined; }
   if (!cmd || cmd === "help" || cmd === "--help") {
     const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
     console.log(lines.slice(1, lines.findIndex((l, i) => i > 0 && !l.startsWith("//"))).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
     return 0;
   }
   const { pos, o } = parseArgs(rest);
-  const r = execute(cmd, pos, o);
+  const r = lib.execute(cmd, pos, o, findRoot());
   (r.code === 1 || r.code === 2 ? console.error : console.log)(r.text);
   return r.code;
 }
