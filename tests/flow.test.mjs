@@ -84,6 +84,12 @@ rollout: rollout
 ---
 `;
 
+// A tool hook denies with JSON on stdout; tests read that as status 2 with the reason on stderr.
+function denied(r) {
+  const m = r.stdout.match(/"permissionDecision":"deny","permissionDecisionReason":("(?:[^"\\]|\\.)*")/);
+  return m ? { ...r, status: 2, stderr: JSON.parse(m[1]) } : r;
+}
+
 function project({ rails = "standard" } = {}) {
   const proj = fs.mkdtempSync(path.join(os.tmpdir(), "lg-flow-"));
   fs.mkdirSync(path.join(proj, ".git"));
@@ -124,7 +130,7 @@ A demo.
   const flow = path.join(skill, "scripts", "flow.mjs");
   const env = { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "" };
   const cli = (...args) => spawnSync(process.execPath, [flow, ...args], { cwd: proj, encoding: "utf8", env });
-  const hook = (event, input) => spawnSync(process.execPath, [flow, "hook", event], { cwd: proj, encoding: "utf8", env, input: JSON.stringify({ cwd: proj, ...input }) });
+  const hook = (event, input) => denied(spawnSync(process.execPath, [flow, "hook", event], { cwd: proj, encoding: "utf8", env, input: JSON.stringify({ cwd: proj, ...input }) }));
   const bash = (command) => hook("pre-tool-use", { tool_name: "Bash", tool_input: { command } });
   const write = (file_path) => hook("pre-tool-use", { tool_name: "Write", tool_input: { file_path } });
   return { proj, skill, cli, hook, bash, write };
@@ -296,28 +302,42 @@ test("a line too deep or too costly to read is refused, not let through", () => 
   assert.equal(p.bash("bash -c \"bash -c 'eval ls'\"").status, 0);
 });
 
-test("a tool hook that crashes refuses the call", () => {
-  const p = project();
-  // An unreadable payload field the hook does not expect: cwd must be a string.
-  const r = p.hook("pre-tool-use", { cwd: 42, tool_name: "Bash", tool_input: { command: "ls" } });
-  assert.equal(r.status, 2);
-  assert.match(r.stderr, /could not check this call/);
-});
-
-test("a runtime that cannot load blocks tool calls instead of letting them through", () => {
+test("a hook that cannot read a call blocks only calls that name the rails, and never stops all work", () => {
   const p = project();
   const scriptsDir = path.join(p.skill, "scripts");
   fs.renameSync(path.join(scriptsDir, "guard.mjs"), path.join(p.proj, "guard.mjs.bak"));
-  let r = p.bash("ls");
+  assert.equal(p.bash("ls").status, 0);
+  assert.equal(p.bash("npm test").status, 0);
+  assert.equal(p.write("src/a.js").status, 0);
+  let r = p.bash("rm -rf .flow");
   assert.equal(r.status, 2);
-  assert.match(r.stderr, /runtime did not load: guard\.mjs/);
-  assert.match(p.hook("session-start", {}).stdout, /rails are broken/);
+  assert.match(r.stderr, /could not read this call \(the runtime did not load: guard\.mjs/);
+  assert.equal(p.write(".claude/skills/demo-flow/SKILL.md").status, 2);
+  assert.equal(p.write(".github/hooks/demo-flow.json").status, 2);
+  assert.equal(p.hook("pre-tool-use", { tool_name: "Bash", tool_input: { command: "rm -rf .\\.claude\\skills" } }).status, 2, "Windows paths");
+  assert.match(p.hook("session-start", {}).stdout, /rails are degraded/);
   assert.equal(p.cli("status").status, 1);
+  // The user's way out still works.
+  assert.equal(p.cli("suspend").status, 0);
+  assert.equal(p.bash("rm -rf .flow/demo-flow/runs").status, 0);
+  assert.equal(p.cli("unsuspend").status, 0);
   // An outdated copy that lacks what flow.mjs needs counts as not loaded.
   fs.writeFileSync(path.join(scriptsDir, "guard.mjs"), "export const guardMatches = () => false;\n");
-  r = p.bash("ls");
+  r = p.bash("rm .claude/skills/demo-flow/SKILL.md");
   assert.equal(r.status, 2);
   assert.match(r.stderr, /guard\.mjs lacks/);
+  assert.equal(p.bash("ls").status, 0);
+});
+
+test("payloads of an unexpected shape never block an everyday call", () => {
+  const p = project();
+  for (const input of [{ cwd: 42 }, { tool_name: 7, tool_input: "ls" }, { toolName: "bash", toolArgs: "{\"command\":\"ls\"}" }, { tool_name: "Bash", tool_input: null }, { tool_name: "Bash", tool_input: { command: ["ls"] } }]) {
+    assert.equal(p.hook("pre-tool-use", input).status, 0, JSON.stringify(input));
+  }
+  for (const raw of ["", "not json", "[]", "null"]) {
+    const r = denied(spawnSync(process.execPath, [path.join(p.skill, "scripts", "flow.mjs"), "hook", "pre-tool-use"], { cwd: p.proj, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "" }, input: raw }));
+    assert.equal(r.status, 0, raw);
+  }
 });
 
 test("an invalid graph keeps the rails' own protections", () => {
@@ -328,6 +348,8 @@ test("an invalid graph keeps the rails' own protections", () => {
   assert.equal(p.write(".claude/skills/demo-flow/profile.md").status, 2);
   assert.equal(p.bash("npm run deploy").status, 0);
   assert.equal(p.write("src/a.js").status, 0);
+  assert.equal(p.cli("suspend").status, 0, "the user can still turn the rails off to repair the graph");
+  assert.equal(p.write(".claude/skills/demo-flow/playbooks/ship.md").status, 0);
 });
 
 test("tools the hook does not know are read by their input", () => {
@@ -561,18 +583,124 @@ test("install writes hooks for each agent, and MCP only on request, idempotently
   const claude = json(".claude/settings.json");
   assert.deepEqual(claude.permissions, { allow: ["Bash(ls)"] });
   for (const ev of ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"]) assert.equal(claude.hooks[ev].length, 1, ev);
-  assert.equal(claude.hooks.PreToolUse[0].hooks[0].command, 'node "$CLAUDE_PROJECT_DIR/.claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use');
+  const launch = (agent) => `node "$(node -p "process.env.CLAUDE_PROJECT_DIR||(require('child_process').spawnSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8'}).stdout||'').trim()||'.'")/.claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use --agent ${agent}`;
+  assert.deepEqual(claude.hooks.PreToolUse[0], { hooks: [{ type: "command", command: launch("claude") }] });
   assert.equal(json(".codex/hooks.json").hooks.PreToolUse.length, 1);
-  assert.equal(json(".codex/hooks.json").hooks.PreToolUse[0].hooks[0].command, 'node ".claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use');
+  assert.equal(json(".codex/hooks.json").hooks.PreToolUse[0].hooks[0].command, launch("codex"));
   const copilot = json(".github/hooks/demo-flow.json");
   assert.equal(copilot.version, 1);
   for (const ev of ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"]) assert.equal(copilot.hooks[ev].length, 1, ev);
-  assert.deepEqual(copilot.hooks.PreToolUse[0], { type: "command", command: 'node ".claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use --format copilot', cwd: "." });
+  assert.deepEqual(copilot.hooks.PreToolUse[0], { type: "command", command: 'node ".claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use --agent copilot', cwd: "." });
   assert.deepEqual(json(".mcp.json").mcpServers["demo-flow"], { command: "node", args: [".claude/skills/demo-flow/scripts/flow.mjs", "mcp"] });
   const toml = fs.readFileSync(path.join(p.proj, ".codex", "config.toml"), "utf8");
   assert.equal(toml.match(/\[mcp_servers\."demo-flow"\]/g).length, 1);
   assert.equal(p.cli("install", "--harness", "vim").status, 2);
   assert.equal(p.cli("install", "--harness", "cursor").status, 2, "only Claude Code, Codex and Copilot are supported");
+});
+
+// Runs a hook command from an installed settings file the way an agent does: through a shell, from
+// some folder, with the agent's own environment (Claude Code sets CLAUDE_PROJECT_DIR; no other does).
+function runInstalled(p, command, { cwd = p.proj, claude = false, input }) {
+  const env = { ...process.env, FLOW_ROOT: "", CLAUDE_PROJECT_DIR: claude ? p.proj : "" };
+  if (!claude) delete env.CLAUDE_PROJECT_DIR;
+  return spawnSync("sh", ["-c", command], { cwd, env, encoding: "utf8", input: JSON.stringify({ hook_event_name: "PreToolUse", cwd, ...input }) });
+}
+const hookOf = (cfg, ev) => { const x = cfg.hooks[ev].at(-1); return x.hooks ? x.hooks[0].command : x.command; };
+const decision = (r) => (/"permissionDecision":"deny"/.test(r.stdout) ? "deny" : r.status !== 0 ? "error" : r.stdout.trim() ? "context" : "allow");
+
+test("Claude Code, Copilot and Codex share a repository in any install order", () => {
+  const orders = [["claude", "copilot", "codex"], ["copilot", "claude", "codex"], ["codex", "claude", "copilot"], ["claude", "codex"], ["claude", "copilot"], ["copilot", "claude"], ["claude"]];
+  for (const order of orders) {
+    const p = project();
+    fs.rmSync(path.join(p.proj, ".git"), { recursive: true });
+    spawnSync("git", ["init", "-q"], { cwd: p.proj });
+    fs.mkdirSync(path.join(p.proj, "src"));
+    for (const h of order) assert.equal(p.cli("install", "--harness", h).status, 0, `${order}: ${h}`);
+    p.cli("install", "--harness", order.join(",")); // again: nothing doubles
+    const json = (f) => JSON.parse(fs.readFileSync(path.join(p.proj, f), "utf8"));
+    const files = { claude: ".claude/settings.json", codex: ".codex/hooks.json", copilot: ".github/hooks/demo-flow.json" };
+    for (const h of order) for (const ev of ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"]) assert.equal(json(files[h]).hooks[ev].length, 1, `${order}: ${h} ${ev}`);
+    const bad = { tool_name: "Bash", tool_input: { command: "rm -rf .flow" } };
+    const ok = { tool_name: "Bash", tool_input: { command: "ls" } };
+    for (const cwd of [p.proj, path.join(p.proj, "src")]) {
+      const where = `${order} from ${path.basename(cwd)}`;
+      if (order.includes("claude")) {
+        const cmd = hookOf(json(files.claude), "PreToolUse");
+        // Claude Code, from the root or a subfolder.
+        assert.equal(decision(runInstalled(p, cmd, { cwd, claude: true, input: bad })), "deny", `${where}: claude`);
+        assert.equal(decision(runInstalled(p, cmd, { cwd, claude: true, input: ok })), "allow", `${where}: claude`);
+        // Copilot runs Claude's hooks too, without CLAUDE_PROJECT_DIR, and reads its own fields.
+        const r = runInstalled(p, cmd, { cwd, input: bad });
+        assert.equal(r.status, 0, `${where}: copilot reading Claude's settings never errors: ${r.stderr}`);
+        assert.equal(decision(r), "deny", `${where}: copilot reading Claude's settings`);
+        assert.equal(decision(runInstalled(p, cmd, { cwd, input: ok })), "allow", `${where}: copilot reading Claude's settings`);
+        const start = runInstalled(p, hookOf(json(files.claude), "SessionStart"), { cwd, input: { hook_event_name: "SessionStart" } });
+        assert.equal(start.status, 0, `${where}: ${start.stderr}`);
+        assert.match(start.stdout, /^\{"additionalContext":/, `${where}: session context in the field Copilot CLI reads`);
+      }
+      if (order.includes("codex")) {
+        const cmd = hookOf(json(files.codex), "PreToolUse");
+        assert.equal(decision(runInstalled(p, cmd, { cwd, input: bad })), "deny", `${where}: codex`);
+        assert.equal(decision(runInstalled(p, cmd, { cwd, input: ok })), "allow", `${where}: codex`);
+      }
+    }
+    if (order.includes("copilot")) {
+      // Copilot runs its own file from the root (cwd ".").
+      const cmd = hookOf(json(files.copilot), "PreToolUse");
+      const r = runInstalled(p, cmd, { input: bad });
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /"permissionDecision":"deny"/, `${order}: copilot`);
+      assert.equal(decision(runInstalled(p, cmd, { input: ok })), "allow");
+      assert.equal(decision(runInstalled(p, hookOf(json(files.copilot), "SessionStart"), { input: { hook_event_name: "SessionStart" } })), "context");
+    }
+  }
+});
+
+test("install replaces the hooks an earlier version wrote instead of adding to them", () => {
+  const p = project();
+  const old = (ev) => `node "$CLAUDE_PROJECT_DIR/.claude/skills/demo-flow/scripts/flow.mjs" hook ${ev}`;
+  fs.mkdirSync(path.join(p.proj, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(p.proj, ".github", "hooks"), { recursive: true });
+  const mine = { type: "command", command: "echo mine" };
+  fs.writeFileSync(path.join(p.proj, ".claude", "settings.json"), JSON.stringify({ hooks: {
+    PreToolUse: [{ matcher: "Bash", hooks: [mine, { type: "command", command: old("pre-tool-use") }] }],
+    SessionStart: [{ hooks: [{ type: "command", command: old("session-start") }] }],
+  } }));
+  fs.writeFileSync(path.join(p.proj, ".github", "hooks", "demo-flow.json"), JSON.stringify({ version: 1, hooks: {
+    PreToolUse: [{ type: "command", command: 'node ".claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use --format copilot', cwd: "." }],
+  } }));
+  assert.equal(p.cli("install", "--harness", "claude,copilot").status, 0);
+  const json = (f) => JSON.parse(fs.readFileSync(path.join(p.proj, f), "utf8"));
+  const claude = json(".claude/settings.json");
+  assert.deepEqual(claude.hooks.PreToolUse[0], { matcher: "Bash", hooks: [mine] }, "the user's own hooks stay");
+  assert.equal(claude.hooks.PreToolUse.length, 2);
+  assert.equal(claude.hooks.SessionStart.length, 1);
+  assert.doesNotMatch(JSON.stringify(claude), /\$CLAUDE_PROJECT_DIR\//);
+  assert.equal(json(".github/hooks/demo-flow.json").hooks.PreToolUse.length, 1);
+  assert.match(json(".github/hooks/demo-flow.json").hooks.PreToolUse[0].command, /--agent copilot$/);
+  // Hooks written before --agent still answer in Copilot's format.
+  const legacy = spawnSync(process.execPath, [path.join(p.skill, "scripts", "flow.mjs"), "hook", "pre-tool-use", "--format", "copilot"], { cwd: p.proj, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "" }, input: JSON.stringify({ cwd: p.proj, tool_name: "bash", tool_input: { command: "rm -rf .flow" } }) });
+  assert.match(legacy.stdout, /"permissionDecision":"deny"/);
+});
+
+test("the agent cannot switch the hooks off in Copilot's, VS Code's or Codex's settings", () => {
+  const p = project();
+  const pre = (tool_name, tool_input) => p.hook("pre-tool-use", { tool_name, tool_input }).status;
+  const at = (f) => path.join(p.proj, f);
+  assert.equal(pre("Write", { file_path: at(".github/copilot/settings.local.json"), content: '{ "disableAllHooks": true }' }), 2);
+  assert.equal(pre("Write", { file_path: at(".vscode/settings.json"), content: '{ "chat.useHooks": false }' }), 2);
+  assert.equal(pre("Write", { file_path: at(".codex/config.toml"), content: "[features]\nhooks = false\n" }), 2);
+  assert.equal(pre("Write", { file_path: at(".codex/config.toml"), content: "features.hooks=false\n" }), 2);
+  assert.equal(p.bash("echo '{\"chat.useHooks\": false}' > .vscode/settings.json").status, 2);
+  assert.equal(p.bash("rm .github/hooks/demo-flow.json").status, 2);
+  // Everyday edits of the same files go through.
+  fs.mkdirSync(at(".vscode"));
+  fs.writeFileSync(at(".vscode/settings.json"), '{\n  "editor.tabSize": 2\n}\n');
+  assert.equal(pre("Edit", { file_path: at(".vscode/settings.json"), old_string: '"editor.tabSize": 2', new_string: '"editor.tabSize": 4' }), 0);
+  assert.equal(pre("Write", { file_path: at(".vscode/settings.json"), content: '{ "chat.useHooks": true, "files.eol": "\\n" }' }), 0);
+  assert.equal(pre("Write", { file_path: at(".codex/config.toml"), content: 'model = "o4"\n' }), 0);
+  assert.equal(p.bash("cat .vscode/settings.json").status, 0);
+  assert.equal(p.bash("python3 -c \"import json; print(json.load(open('.vscode/settings.json')))\"").status, 0);
 });
 
 test("tool names and payloads of different agents are normalized", () => {
@@ -704,7 +832,7 @@ test("one skill copy runs in two projects with each project's own values", () =>
   const flow = path.join(p.skill, "scripts", "flow.mjs");
   const env = { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "" };
   const cli = (...args) => spawnSync(process.execPath, [flow, ...args], { cwd: other, encoding: "utf8", env });
-  const hook = (input) => spawnSync(process.execPath, [flow, "hook", "pre-tool-use"], { cwd: other, encoding: "utf8", env, input: JSON.stringify({ cwd: other, ...input }) });
+  const hook = (input) => denied(spawnSync(process.execPath, [flow, "hook", "pre-tool-use"], { cwd: other, encoding: "utf8", env, input: JSON.stringify({ cwd: other, ...input }) }));
   assert.equal(cli("start", "spike", "--request", "try it").status, 0);
   assert.match(cli("status").stdout, /Try it in `tmp, notebooks\/`/);
   assert.match(cli("status").stdout, /Bindings \(from \.flow\/demo-flow\/project\.md\): \$\{scratch\} = `tmp`, `notebooks`/);
