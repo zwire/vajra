@@ -599,11 +599,13 @@ test("install writes hooks for each agent, and MCP only on request, idempotently
 });
 
 // Runs a hook command from an installed settings file the way an agent does: through a shell, from
-// some folder, with the agent's own environment (Claude Code sets CLAUDE_PROJECT_DIR; no other does).
+// some folder, with the agent's own environment and payload (Claude Code sets CLAUDE_PROJECT_DIR and
+// sends no timestamp; Copilot and VS Code send one).
 function runInstalled(p, command, { cwd = p.proj, claude = false, input }) {
   const env = { ...process.env, FLOW_ROOT: "", CLAUDE_PROJECT_DIR: claude ? p.proj : "" };
   if (!claude) delete env.CLAUDE_PROJECT_DIR;
-  return spawnSync("sh", ["-c", command], { cwd, env, encoding: "utf8", input: JSON.stringify({ hook_event_name: "PreToolUse", cwd, ...input }) });
+  const payload = { hook_event_name: "PreToolUse", cwd, ...(claude ? {} : { timestamp: "2026-10-17T00:00:00.000Z" }), ...input };
+  return spawnSync("sh", ["-c", command], { cwd, env, encoding: "utf8", input: JSON.stringify(payload) });
 }
 const hookOf = (cfg, ev) => { const x = cfg.hooks[ev].at(-1); return x.hooks ? x.hooks[0].command : x.command; };
 const decision = (r) => (/"permissionDecision":"deny"/.test(r.stdout) ? "deny" : r.status !== 0 ? "error" : r.stdout.trim() ? "context" : "allow");
@@ -629,14 +631,22 @@ test("Claude Code, Copilot and Codex share a repository in any install order", (
         // Claude Code, from the root or a subfolder.
         assert.equal(decision(runInstalled(p, cmd, { cwd, claude: true, input: bad })), "deny", `${where}: claude`);
         assert.equal(decision(runInstalled(p, cmd, { cwd, claude: true, input: ok })), "allow", `${where}: claude`);
-        // Copilot runs Claude's hooks too, without CLAUDE_PROJECT_DIR, and reads its own fields.
+        // Copilot runs Claude's hooks too, without CLAUDE_PROJECT_DIR. They stand in for Copilot's own
+        // hooks when it has none, and step aside when it has, so each event runs once.
+        const own = order.includes("copilot");
         const r = runInstalled(p, cmd, { cwd, input: bad });
         assert.equal(r.status, 0, `${where}: copilot reading Claude's settings never errors: ${r.stderr}`);
-        assert.equal(decision(r), "deny", `${where}: copilot reading Claude's settings`);
+        assert.equal(decision(r), own ? "allow" : "deny", `${where}: copilot reading Claude's settings`);
         assert.equal(decision(runInstalled(p, cmd, { cwd, input: ok })), "allow", `${where}: copilot reading Claude's settings`);
         const start = runInstalled(p, hookOf(json(files.claude), "SessionStart"), { cwd, input: { hook_event_name: "SessionStart" } });
         assert.equal(start.status, 0, `${where}: ${start.stderr}`);
-        assert.match(start.stdout, /^\{"additionalContext":/, `${where}: session context in the field Copilot CLI reads`);
+        if (own) assert.equal(start.stdout, "", `${where}: session context comes once, from Copilot's own hook`);
+        else assert.match(start.stdout, /^\{"additionalContext":/, `${where}: session context in the field Copilot CLI reads`);
+        // Without both signs of another agent, a Claude hook never steps aside.
+        const env = { ...process.env, FLOW_ROOT: "" };
+        delete env.CLAUDE_PROJECT_DIR;
+        const bare = spawnSync("sh", ["-c", cmd], { cwd, env, encoding: "utf8", input: JSON.stringify({ hook_event_name: "PreToolUse", cwd, ...bad }) });
+        assert.equal(decision(bare), "deny", `${where}: no timestamp`);
       }
       if (order.includes("codex")) {
         const cmd = hookOf(json(files.codex), "PreToolUse");
@@ -652,6 +662,11 @@ test("Claude Code, Copilot and Codex share a repository in any install order", (
       assert.match(r.stdout, /"permissionDecision":"deny"/, `${order}: copilot`);
       assert.equal(decision(runInstalled(p, cmd, { input: ok })), "allow");
       assert.equal(decision(runInstalled(p, hookOf(json(files.copilot), "SessionStart"), { input: { hook_event_name: "SessionStart" } })), "context");
+      // Copilot CLI runs every event from both files: one of the two answers, never both.
+      for (const [ev, input] of [["SessionStart", { hook_event_name: "SessionStart" }], ["PreToolUse", bad], ["Stop", { hook_event_name: "Stop" }]]) {
+        const answers = Object.entries(files).filter(([h]) => h !== "codex" && order.includes(h)).map(([, f]) => runInstalled(p, hookOf(json(f), ev), { input }).stdout.trim()).filter(Boolean);
+        assert.ok(answers.length <= 1, `${order}: ${ev} answered ${answers.length} times`);
+      }
     }
   }
 });
