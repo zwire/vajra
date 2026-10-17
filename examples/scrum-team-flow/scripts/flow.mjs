@@ -4,9 +4,9 @@
 // Puts the agent on the rails of the graph instead of trusting it to follow prose. The runtime
 // keeps the run state (a checkpoint: which playbook owns the request, which steps are done),
 // refuses every move the graph does not allow, runs each playbook's checks before its exits open,
-// and interrupts at every [human-gate] until the human resumes it. It is tool-agnostic: the agent
-// drives it as a CLI (no context cost until used), and the lifecycle-hook protocol shared by current
-// coding agents (JSON on stdin, exit code 2 blocks) enforces it whether or not the agent cooperates.
+// and interrupts at every [human-gate] until the human resumes it. The agent drives it as a CLI (no
+// context cost until used), and lifecycle hooks in Claude Code, Codex and GitHub Copilot (JSON on
+// stdin, exit code 2 blocks) enforce it whether or not the agent cooperates.
 // An MCP server is available as an opt-in for clients that support MCP elicitation.
 //
 // Agent commands:
@@ -22,9 +22,9 @@
 //   flow reject --reason <text>                   refuse it
 //   flow suspend  |  flow unsuspend               turn the hooks off and on
 // Integration:
-//   flow hook <session-start|user-prompt|pre-tool-use|stop> [--format copilot|antigravity]
+//   flow hook <session-start|user-prompt|pre-tool-use|stop> [--format copilot]
 //                                                 lifecycle hook (JSON on stdin)
-//   flow install --harness <claude|codex|cursor|copilot|antigravity|qwen|factory|windsurf>[,...]
+//   flow install --harness <claude|codex|copilot>[,...]
 //                [--scope project|local] [--mcp] [--dry-run]
 //                                                 hooks, plus a .flow/<skill>/project.md skeleton
 //                                                 for the skill's bindings when there is none
@@ -34,14 +34,32 @@
 // Environment: FLOW_ROOT (project root), FLOW_SKILL (skill directory; default: the parent of scripts/).
 // Project values: the skill names commands, paths and other repository-specific values as ${name}
 // bindings (declared in its bindings.md); each project gives them in .flow/<skill>/project.md.
-// No dependencies: Node 18+ only. Needs validate.mjs next to it.
+// No dependencies: Node 18+ only. Needs validate.mjs and guard.mjs next to it.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { validateSkill, commandMatches, guardMatches, shellCommands, programName, commandStart, globToRegExp, readProject, projectFile, resolveText, resolveList, VERSION } from "./validate.mjs";
+
+// The rest of the runtime is loaded here rather than imported, so a missing or outdated file is
+// caught: a hook that failed to start would exit 1, which agents treat as "allow" (see main).
+const REQUIRED = {
+  "validate.mjs": ["validateSkill", "commandMatches", "globToRegExp", "readProject", "projectFile", "resolveText", "resolveList", "VERSION"],
+  "guard.mjs": ["guardMatches", "toolAction", "shellViolation", "dropsHooks", "railsPaths", "inside", "samePath", "codeTouchesRails"],
+};
+let loadError = null;
+const lib = {};
+for (const [file, names] of Object.entries(REQUIRED)) {
+  try {
+    const m = await import(`./${file}`);
+    const missing = names.filter((n) => m[n] === undefined);
+    if (missing.length) throw new Error(`${file} lacks ${missing.join(", ")}; copy the runtime from vajra again`);
+    Object.assign(lib, m);
+  } catch (e) { loadError ||= `${file}: ${e.message}`; }
+}
+const { validateSkill, commandMatches, globToRegExp, readProject, projectFile, resolveText, resolveList, VERSION } = lib;
+const { guardMatches, toolAction, shellViolation, dropsHooks, railsPaths, inside, samePath, codeTouchesRails } = lib;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const skillDir = path.resolve(process.env.FLOW_SKILL || path.join(here, ".."));
@@ -54,12 +72,15 @@ class Stop extends Error {
   constructor(message, code = 1) { super(message); this.code = code; }
 }
 const refuse = (msg) => { throw new Stop(msg, 1); };
+// A path relative to the project root, with forward slashes on every platform.
+const relPath = (root, p) => path.relative(root, p).split(path.sep).join("/");
+const railsLevel = (g) => g.profile.rails || "standard";
 
 // ---------- project, graph, state ----------
 
 export function findRoot(start = process.cwd()) {
   if (process.env.FLOW_ROOT) return path.resolve(process.env.FLOW_ROOT);
-  for (const v of ["CLAUDE_PROJECT_DIR", "CURSOR_PROJECT_DIR", "QWEN_PROJECT_DIR", "FACTORY_PROJECT_DIR"]) if (process.env[v]) return path.resolve(process.env[v]);
+  if (process.env.CLAUDE_PROJECT_DIR) return path.resolve(process.env.CLAUDE_PROJECT_DIR);
   let d = path.resolve(start);
   for (;;) {
     if (fs.existsSync(path.join(d, ".flow")) || fs.existsSync(path.join(d, ".git"))) return d;
@@ -92,7 +113,7 @@ function loadGraph(root) {
   const errors = [...r.errors, ...problems.map((p) => `${path.relative(root, file)}: ${p}`)];
   return {
     ok: errors.length === 0, errors, nodes: new Map(nodes.map((n) => [n.id, n])), entries: r.entries, profile: r.profile || {},
-    bindings: r.bindings || {}, unbound: [...missing].sort(), unboundGuards: [...guardGap].sort(), projectFile: path.relative(root, file).split(path.sep).join("/"),
+    bindings: r.bindings || {}, unbound: [...missing].sort(), unboundGuards: [...guardGap].sort(), projectFile: relPath(root, file),
   };
 }
 
@@ -162,7 +183,7 @@ function allowedExits(node, run) {
 }
 
 const flowCmd = (root) => {
-  const rel = path.relative(root, path.join(here, "flow.mjs")).split(path.sep).join("/");
+  const rel = relPath(root, path.join(here, "flow.mjs"));
   return `node ${rel.startsWith("..") ? path.join(here, "flow.mjs") : rel}`;
 };
 
@@ -188,7 +209,8 @@ function describe(g, state, root) {
   const run = state.run;
   if (g.unbound.length) {
     const what = g.unbound.map((n) => `${n} (${g.bindings[n] || "not declared in bindings.md"})`).join("; ");
-    const note = `${tag} This project has not bound ${what}. The user writes the values in ${g.projectFile}; until then no run can start.`;
+    const guards = g.unboundGuards.length ? ` Guarded commands that use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")} are not recognized either, so ask before anything irreversible.` : "";
+    const note = `${tag} This project has not bound ${what}. The user writes the values in ${g.projectFile}; until then no run can start.${guards}`;
     if (!run) return note;
     return `${note}\n${describeRun(g, state, root)}`;
   }
@@ -349,77 +371,32 @@ function cmdLog(st) {
 }
 
 // ---------- install: hooks and MCP registration per harness ----------
-// The runtime is the same everywhere; only the configuration files differ. Every harness below
-// runs hook commands with a JSON payload on stdin and treats exit code 2 as "block".
-// `hooks` names the file (and `top` when events sit at its top level instead of under "hooks";
-// `group` names a top-level key to put them under instead), `entry` shapes one hook entry,
-// `cwd` is the directory the agent runs hooks in, and an event may map to several native events
-// or be absent.
+// The runtime is the same for every agent; only the configuration files differ. Each one runs
+// hook commands with a JSON payload on stdin and treats exit code 2 as "block".
 
-const CLAUDE_EVENTS = { "session-start": "SessionStart", "user-prompt": "UserPromptSubmit", "pre-tool-use": "PreToolUse", stop: "Stop" };
-const nested = (command) => ({ hooks: [{ type: "command", command }] });
+const EVENTS = { "session-start": "SessionStart", "user-prompt": "UserPromptSubmit", "pre-tool-use": "PreToolUse", stop: "Stop" };
 
 const HARNESSES = {
   claude: {
-    hooks: ({ scope }) => (scope === "local" ? ".claude/settings.local.json" : ".claude/settings.json"),
-    events: CLAUDE_EVENTS,
+    hooks: (scope) => (scope === "local" ? ".claude/settings.local.json" : ".claude/settings.json"),
     rootVar: "$CLAUDE_PROJECT_DIR",
+    entry: (command) => ({ hooks: [{ type: "command", command }] }),
     mcp: { file: ".mcp.json", format: "json" },
   },
   codex: {
     hooks: () => ".codex/hooks.json",
-    events: CLAUDE_EVENTS,
+    entry: (command) => ({ hooks: [{ type: "command", command }] }),
     mcp: { file: ".codex/config.toml", format: "toml" },
     note: "Codex runs project hooks only with `codex_hooks = true` under [features] in .codex/config.toml.",
-  },
-  cursor: {
-    hooks: () => ".cursor/hooks.json",
-    events: { "session-start": "sessionStart", "user-prompt": "beforeSubmitPrompt", "pre-tool-use": "preToolUse", stop: "stop" },
-    entry: (command) => ({ command }),
-    version: 1,
-    mcp: { file: ".cursor/mcp.json", format: "json" },
   },
   // Copilot CLI, cloud agent and VS Code all read .github/hooks/*.json. PascalCase event names
   // select the snake_case payload the hook reads; --format copilot shapes the output (see runHook).
   copilot: {
     hooks: () => `.github/hooks/${skillName}.json`,
-    events: CLAUDE_EVENTS,
-    args: "--format copilot",
+    args: " --format copilot",
     entry: (command) => ({ type: "command", command, cwd: "." }),
     version: 1,
     note: "Copilot CLI runs repository hooks only in a folder you have trusted, and ignores UserPromptSubmit output, so run state is injected only at session start; chat approvals are still recorded.",
-  },
-  // Antigravity (CLI, IDE and app) reads .agents/hooks.json, keyed by hook name, and runs hooks in
-  // .agents/. It has no prompt hook: PreInvocation stands in for it, and chat approvals are not seen.
-  antigravity: {
-    hooks: () => ".agents/hooks.json",
-    group: () => skillName,
-    events: { "user-prompt": "PreInvocation", "pre-tool-use": "PreToolUse", stop: "Stop" },
-    entry: (command, native) => (native === "PreToolUse" ? { matcher: ".*", hooks: [{ type: "command", command }] } : { type: "command", command }),
-    cwd: ".agents",
-    args: "--format antigravity",
-    note: "Antigravity has no prompt hook, so human gates are passed with `flow approve` in a terminal, and it skips every hook under --dangerously-skip-permissions.",
-  },
-  qwen: {
-    hooks: () => ".qwen/settings.json",
-    events: CLAUDE_EVENTS,
-    rootVar: "$QWEN_PROJECT_DIR",
-    mcp: { file: ".qwen/settings.json", format: "json" },
-    note: "Qwen Code loads project hooks only in a trusted folder.",
-  },
-  // Droid reads the hooks key of settings.json only when hooks.json is absent.
-  factory: {
-    hooks: ({ exists }) => (exists(".factory/hooks.json") ? { file: ".factory/hooks.json", top: true } : ".factory/settings.json"),
-    events: CLAUDE_EVENTS,
-    rootVar: "$FACTORY_PROJECT_DIR",
-  },
-  // Cascade reads the legacy .windsurf/hooks.json only when .devin/hooks.json defines no hooks.
-  // It has no session-start or stop hooks, and its payload is normalized in normalizePayload().
-  windsurf: {
-    hooks: ({ exists }) => (exists(".devin/hooks.json") ? ".devin/hooks.json" : ".windsurf/hooks.json"),
-    events: { "user-prompt": "pre_user_prompt", "pre-tool-use": ["pre_run_command", "pre_write_code"] },
-    entry: (command) => ({ command, show_output: false }),
-    note: "Cascade cannot inject context or bounce a stop; it blocks guarded commands and out-of-bounds edits, and records chat approvals.",
   },
 };
 
@@ -434,29 +411,25 @@ function install(root, o) {
   const scope = o.scope || "project";
   if (!["project", "local"].includes(scope)) throw new Stop("--scope must be project or local", 2);
   const script = path.join(here, "flow.mjs");
-  const rel = path.relative(root, script).split(path.sep).join("/");
-  const inside = !rel.startsWith("..") && !path.isAbsolute(rel);
+  const rel = relPath(root, script);
+  const inRoot = !rel.startsWith("..") && !path.isAbsolute(rel);
   const writes = new Map();
   const report = [];
   const load = (file) => (writes.has(file) ? writes.get(file) : readJson(path.join(root, file)));
 
   for (const name of names) {
     const h = HARNESSES[name];
-    const fromCwd = h.cwd ? path.relative(path.join(root, h.cwd), script).split(path.sep).join("/") : rel;
-    const target = !inside ? JSON.stringify(script) : h.rootVar ? `"${h.rootVar}/${rel}"` : JSON.stringify(fromCwd);
-    const where = h.hooks({ scope, exists: (f) => writes.has(f) || fs.existsSync(path.join(root, f)) });
-    const { file, top } = typeof where === "string" ? { file: where } : where;
+    const target = !inRoot ? JSON.stringify(script) : h.rootVar ? `"${h.rootVar}/${rel}"` : JSON.stringify(rel);
+    const file = h.hooks(scope);
     const cfg = load(file);
     if (h.version) cfg.version ||= h.version;
-    const events = top ? cfg : h.group ? (cfg[h.group()] ||= {}) : (cfg.hooks ||= {});
+    const events = (cfg.hooks ||= {});
     const added = [];
-    for (const [ev, natives] of Object.entries(h.events)) {
-      const command = `node ${target} hook ${ev}${h.args ? ` ${h.args}` : ""}`;
-      for (const native of [natives].flat()) {
-        const list = (events[native] ||= []);
-        const has = list.some((x) => x.command === command || (x.hooks || []).some((y) => y.command === command));
-        if (!has) { list.push((h.entry || nested)(command, native)); added.push(native); }
-      }
+    for (const [ev, native] of Object.entries(EVENTS)) {
+      const command = `node ${target} hook ${ev}${h.args || ""}`;
+      const list = (events[native] ||= []);
+      const has = list.some((x) => x.command === command || (x.hooks || []).some((y) => y.command === command));
+      if (!has) { list.push(h.entry(command)); added.push(native); }
     }
     writes.set(file, cfg);
     report.push(`${name}: ${added.length ? `hooks ${added.join(", ")} added` : "hooks already present"} in ${file}${h.note ? ` (${h.note})` : ""}`);
@@ -464,8 +437,8 @@ function install(root, o) {
     // MCP is opt-in: tool schemas cost context in every session, and only elicitation adds
     // something the CLI and hooks do not.
     if (!o.mcp) continue;
-    if (!h.mcp) { report.push(`${name}: MCP registration is not automated; register \`node ${inside ? rel : script} mcp\` in its MCP settings by hand`); continue; }
-    const server = { command: "node", args: [inside ? rel : script, "mcp"] };
+    if (!h.mcp) { report.push(`${name}: MCP registration is not automated; register \`node ${inRoot ? rel : script} mcp\` in its MCP settings by hand`); continue; }
+    const server = { command: "node", args: [inRoot ? rel : script, "mcp"] };
     if (h.mcp.format === "json") {
       const m = load(h.mcp.file);
       m.mcpServers ||= {};
@@ -484,7 +457,7 @@ function install(root, o) {
   }
 
   // The project's values for the skill's bindings: a skeleton the user fills in, never overwritten.
-  const proj = path.relative(root, projectFile(root, skillName)).split(path.sep).join("/");
+  const proj = relPath(root, projectFile(root, skillName));
   const declared = Object.entries(loadGraph(root).bindings);
   if (declared.length && !fs.existsSync(path.join(root, proj))) {
     writes.set(proj, [
@@ -513,282 +486,72 @@ function install(root, o) {
 }
 
 // ---------- lifecycle hooks (tool-agnostic) ----------
-// Payloads differ slightly between agents; read the fields every current agent provides.
-
-// Copilot CLI: bash or powershell, create and edit ({ path }); its PascalCase hooks report these as
-// Bash, Read and Edit, and an apply_patch edit as Edit with the bare patch text as tool_input.
-// VS Code: run_in_terminal ({ command }),
-// create_file, replace_string_in_file, insert_edit_into_file, edit_notebook_file ({ filePath }),
-// multi_replace_string_in_file ({ replacements: [{ filePath }] }). Factory Droid: Execute, Create, Edit.
-const SHELL_TOOLS = new Set(["bash", "powershell", "shell", "run_shell_command", "exec_command", "local_shell", "terminal", "execute", "run_in_terminal"]);
-const EDIT_TOOLS = new Set([
-  "edit", "write", "create", "multiedit", "notebookedit", "write_file", "edit_file", "create_file",
-  "str_replace_based_edit_tool", "replace_string_in_file", "multi_replace_string_in_file", "insert_edit_into_file", "edit_notebook_file",
-]);
-
-function toolInput(input) {
-  const ti = input.tool_input ?? input.toolInput ?? input.toolArgs ?? input.input ?? {};
-  if (typeof ti !== "string") return ti || {};
-  try { return JSON.parse(ti) || {}; } catch { return { input: ti }; }
-}
-
-const patchPaths = (ti) => {
-  const text = Object.values(ti).filter((v) => typeof v === "string").join("\n");
-  return [...text.matchAll(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/gm)].map((m) => m[1].trim());
-};
+// What a tool call does and whether it touches the rails is read in guard.mjs.
 
 function readStdin() {
   try { return JSON.parse(fs.readFileSync(0, "utf8") || "{}"); } catch { return {}; }
 }
 
-// Windsurf Cascade sends { agent_action_name, tool_info } and Antigravity { workspacePaths, toolCall }
-// instead of the shared fields.
-export function normalizePayload(input) {
-  if (Array.isArray(input.workspacePaths)) {
-    const out = { ...input, cwd: input.cwd || input.workspacePaths[0] };
-    const { name, args = {} } = input.toolCall || {};
-    if (name === "run_command") Object.assign(out, { tool_name: "Bash", tool_input: { command: args.CommandLine } });
-    else if (/^(write_to_file|replace_file_content|multi_replace_file_content)$/.test(name || "")) Object.assign(out, { tool_name: "Write", tool_input: { file_path: args.TargetFile } });
-    else if (name) Object.assign(out, { tool_name: name, tool_input: args });
-    return out;
-  }
-  const ti = input.tool_info;
-  if (!input.agent_action_name || !ti) return input;
-  const out = { ...input, cwd: input.cwd || ti.cwd, hook_event_name: input.agent_action_name };
-  if (input.agent_action_name === "pre_run_command") Object.assign(out, { tool_name: "Bash", tool_input: { command: ti.command_line } });
-  if (input.agent_action_name === "pre_write_code") Object.assign(out, { tool_name: "Write", tool_input: { file_path: ti.file_path } });
-  if (input.agent_action_name === "pre_user_prompt") out.prompt = ti.user_prompt;
-  return out;
-}
-
-const PS_LIKE = /(^|[\s;|&({])(remove|set|add|clear|out|new|move|copy|rename|get|invoke|start|write|select|test|resolve|foreach|where|import|export|convertto|convertfrom)-[a-z]+|\.flow\\|\\\.flow|`/i;
-
-// What an edit takes out and puts in, for the hook settings check: old/new strings, a whole new
-// file, or the - and + lines of a patch.
-function editChange(ti) {
-  const edits = [ti, ...(Array.isArray(ti.edits) ? ti.edits : []), ...(Array.isArray(ti.replacements) ? ti.replacements : [])].filter((e) => e && typeof e === "object");
-  const pick = (e, keys) => keys.map((k) => e[k]).filter((v) => typeof v === "string");
-  const patch = Object.values(ti).filter((v) => typeof v === "string" && v.includes("*** ")).join("\n");
-  const removed = [...edits.flatMap((e) => pick(e, ["old_string", "oldString", "old_str"])), ...patch.split("\n").filter((l) => l.startsWith("-"))].join("\n");
-  const added = [...edits.flatMap((e) => pick(e, ["new_string", "newString", "new_str", "code"])), ...patch.split("\n").filter((l) => l.startsWith("+"))].join("\n");
-  const whole = pick(ti, ["content", "file_text", "CodeContent", "contents"])[0];
-  return { removed, added, whole };
-}
-
-export function toolAction(input) {
-  const name = String(input.tool_name || input.toolName || "").toLowerCase();
-  const ti = toolInput(input);
-  if (SHELL_TOOLS.has(name) || (!name && (ti.command || input.command))) {
-    const c = ti.command ?? ti.cmd ?? ti.CommandLine ?? ti.command_line ?? input.command ?? "";
-    // An argv array is quoted back into one line, so `["bash", "-lc", "x y"]` keeps its script whole.
-    const quote = (a) => (/^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replace(/'/g, "'\\''")}'`);
-    const command = Array.isArray(c) ? c.map((a) => quote(String(a))).join(" ") : String(c);
-    // Also read the line as PowerShell where it may run as such: a PowerShell tool, a non-Bash
-    // shell tool on Windows, or a line that looks like PowerShell.
-    const ps = /^(powershell|pwsh)$/.test(name) || (process.platform === "win32" && name !== "bash") || PS_LIKE.test(command);
-    return { kind: "shell", command, ps };
-  }
-  if (name === "apply_patch" || name === "applypatch") return { kind: "edit", paths: patchPaths(ti), change: editChange(ti) };
-  if (EDIT_TOOLS.has(name)) {
-    const paths = [ti.file_path || ti.filePath || ti.path || ti.notebook_path || ti.target_file || ti.absolute_path, ...patchPaths(ti)];
-    if (Array.isArray(ti.replacements)) paths.push(...ti.replacements.map((r) => r?.filePath || r?.file_path));
-    return { kind: "edit", paths: paths.filter(Boolean).map(String), change: editChange(ti) };
-  }
-  return { kind: "other" };
-}
-
-// ---------- shell access to the run state and to the human-only commands ----------
-// Reading .flow/ is harmless (the Read tool may do it too); changing it, or running the commands
-// only the human may run, must not happen from the agent's shell. Checked on every reading of
-// the line (POSIX shell, and PowerShell where it may run), any case, either slash.
-const STATE_PATH = /(^|[/=:,])\.flow(\/|$)/;
-const norm = (t) => t.replace(/\\/g, "/").toLowerCase();
-const mentionsState = (t) => /\.flow/i.test(t);
-
-// A glob segment that could expand to .flow: `.f*`, `.fl?w`, and in PowerShell a bare `*`
-// (its wildcards match dotfiles).
-function globHitsState(seg, ps) {
-  if (!/[*?[]/.test(seg) || (!ps && !seg.startsWith("."))) return false;
-  let re = "";
-  for (let i = 0; i < seg.length; i++) {
-    const c = seg[i];
-    if (c === "*") re += ".*";
-    else if (c === "?") re += ".";
-    else if (c === "[") { const e = seg.indexOf("]", i + 1); if (e < 0) re += "\\["; else { re += `[${seg.slice(i + 1, e).replace(/^!/, "^").replace(/\\/g, "\\\\")}]`; i = e; } }
-    else re += c.replace(/[.+^${}()|\\]/g, "\\$&");
-  }
-  try { return new RegExp(`^${re}$`).test(".flow"); } catch { return true; }
-}
-const isStateWord = (t, ps) => STATE_PATH.test(norm(t)) || norm(t).split(/[/=:,]/).some((seg) => globHitsState(seg, ps));
-// A plain path argument, as opposed to an option value, a script or a sentence.
-const purePath = (t) => !/^-/.test(t) && !/\s/.test(t) && STATE_PATH.test(norm(t));
-
-// Programs that only read the files they are given, with the flags that make them write or run code.
-const READERS = new Map(Object.entries({
-  cat: null, head: null, tail: null, less: /^(-o|-O|--log-file|--LOG-FILE)/, more: null, ls: null, wc: null, grep: null, egrep: null, fgrep: null,
-  rg: /^--pre/, jq: null, stat: null, file: null, diff: null, cmp: null, tree: null, du: null, sort: /^(-o|--output)/, uniq: null, cut: null,
-  column: null, od: null, xxd: null, hexdump: null, strings: null, md5sum: null, sha1sum: null, sha256sum: null, shasum: null, type: null,
-  find: /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/, sed: /^(-i|--in-place|-I)/, awk: /^(-i|--in-place)/, gawk: /^(-i|--in-place)/,
-  dir: null, findstr: null, "get-content": null, gc: null, "get-childitem": null, gci: null, "select-string": null, sls: null, "test-path": null,
-  "get-item": null, gi: null, "get-itemproperty": null, gp: null, "resolve-path": null, rvpa: null, "format-hex": null, fhx: null, "get-filehash": null,
-}));
-// These take a script that could write, so a .flow mention outside a plain path argument counts as a write.
-const SCRIPTED = new Set(["sed", "awk", "gawk", "less"]);
-const OUTPUT_FLAG = /^(-o|--output|--output-file|--log-file|-outfile)$/i;
-const GIT_READS = new Set(["add", "commit", "log", "show", "diff", "status", "blame", "ls-files", "ls-tree", "grep", "cat-file", "check-ignore", "rev-parse", "describe", "shortlog"]);
-const INTERPRETERS = /^(python\d*(\.\d+)?|node|nodejs|deno|bun|ruby|perl|php|osascript|lua|tclsh)$/;
-const HUMAN_ONLY = new Set(["approve", "reject", "suspend", "unsuspend", "hook", "mcp"]);
-
-function commandViolation(w) {
-  const k = commandStart(w);
-  const name = programName(w[k].text);
-  const args = w.slice(k + 1);
-  const flowAt = w.findIndex((x) => programName(x.text) === "flow.mjs");
-  if (flowAt >= 0 && w.slice(flowAt + 1).some((x) => HUMAN_ONLY.has(x.text.toLowerCase()))) return "human";
-  // Code that loads flow.mjs itself could call approve() or answer a gate.
-  if (INTERPRETERS.test(name) && args.some((x) => /flow\.mjs/i.test(x.text) && programName(x.text) !== "flow.mjs")) return "human";
-  if (name === "git" && args.find((x) => !/^-/.test(x.text))?.text === "clean" && args.some((x) => /^-[a-z]*[xX]/.test(x.text)) && !args.some((x) => /^(-[a-z]*n|--dry-run)$/.test(x.text))) return "clean";
-  if (w.some((x) => x.redir && isStateWord(x.text, w.ps))) return "state";
-  // Interpreter code can open any path, so any mention of .flow in its arguments counts.
-  if (INTERPRETERS.test(name)) return args.some((x) => mentionsState(x.text)) ? "state" : null;
-  if (name === "cp" || /^(copy-item|cpi|copy)$/.test(name)) {
-    // Copying out of .flow/ only reads it; the destination must not be in it.
-    const dest = name === "cp"
-      ? (args.some((x) => /^(-t|--target-directory)/.test(x.text)) ? null : args.filter((x) => !/^-/.test(x.text)).pop())
-      : args[args.findIndex((x) => /^-d(e(s(t(i(n(a(t(i(o(n)?)?)?)?)?)?)?)?)?)?$/i.test(x.text)) + 1];
-    if (!dest || isStateWord(dest.text, w.ps)) return args.some((x) => isStateWord(x.text, w.ps)) ? "state" : null;
-    return args.some((x) => x !== dest && mentionsState(x.text) && STATE_PATH.test(norm(x.text)) && !purePath(x.text.replace(/^-(path|literalpath|lp):/i, ""))) ? "state" : null;
-  }
-  const reader = READERS.has(name) ? READERS.get(name) : name === "git" && GIT_READS.has(args.find((x) => !/^-/.test(x.text))?.text) ? /^--output/ : undefined;
-  if (reader === undefined) {
-    const deletes = w.ps && /^(remove-item|rm|ri|del|erase|rd|rmdir|clear-content|clc|move-item|mi|mv|move|rename-item|rni|ren)$/.test(name);
-    return args.some((x) => isStateWord(x.text, w.ps && deletes)) ? "state" : null;
-  }
-  if (!args.some((x) => mentionsState(x.text))) return null;
-  if (reader && args.some((x) => reader.test(x.text))) return "state";
-  for (const [j, x] of args.entries()) {
-    if (!mentionsState(x.text)) continue;
-    const value = x.text.replace(/^-(path|literalpath|lp):/i, "");
-    if (STATE_PATH.test(norm(value)) && (!purePath(value) || OUTPUT_FLAG.test(args[j - 1]?.text || ""))) return "state";
-    if (SCRIPTED.has(name) && !purePath(value)) return "state";
-  }
-  return null;
-}
-
-// The rails' own definition: the skill (playbooks, profile, these scripts) and the agents' hook
-// settings. They change only while the human has suspended the rails, so the agent cannot switch
-// its own rails off (rails: advisory, a deleted guard, a removed hook, disableAllHooks).
-const HOOK_CONFIGS = [".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml", ".cursor/hooks.json",
-  ".agents/hooks.json", ".qwen/settings.json", ".factory/hooks.json", ".factory/settings.json", ".devin/hooks.json", ".windsurf/hooks.json"];
-const lc = (p) => p.replace(/\\/g, "/").toLowerCase();
-function railsPaths(root) {
-  const configs = [...HOOK_CONFIGS, `.github/hooks/${skillName}.json`].map((f) => path.join(root, f));
-  configs.push(path.join(os.homedir(), ".claude", "settings.json"), path.join(os.homedir(), ".codex", "config.toml"));
-  return { skill: skillDir, configs, state: path.join(root, ".flow") };
-}
-const inside = (p, dir) => lc(p) === lc(dir) || lc(p).startsWith(lc(dir).replace(/\/$/, "") + "/");
-// Hook settings may change except where an edit drops a flow.mjs hook or turns hooks off.
-const DISABLES_HOOKS = /disableAllHooks|codex_hooks\s*=\s*false/i;
-const DELETERS = /^(rm|rmdir|unlink|shred|mv|move|remove-item|ri|del|erase|rd|move-item|mi|rename-item|rni)$/;
-
-function railsViolation(w, ctx) {
-  const k = commandStart(w), name = programName(w[k].text), args = w.slice(k + 1);
-  const rp = railsPaths(ctx.root);
-  const resolve = (t) => path.resolve(ctx.cwd, t.replace(/^-[a-z]+:/i, "").replace(/^~(?=\/|\\|$)/, os.homedir()));
-  // Deleting or moving a directory that holds the state or the rails.
-  if (DELETERS.test(name)) {
-    for (const x of args) {
-      if (/^-/.test(x.text) || /[*?[]/.test(x.text)) continue;
-      const p = resolve(x.text);
-      if ([rp.state, rp.skill, ...rp.configs].some((q) => inside(q, p))) return inside(rp.state, p) && !inside(rp.skill, p) ? "state" : "rails";
-    }
-  }
-  if (READERS.has(name) && !READERS.get(name)) return null;
-  if (name === "git" && GIT_READS.has(args.find((x) => !/^-/.test(x.text))?.text)) return null;
-  if (INTERPRETERS.test(name)) {
-    // Interpreter code (not the script it runs) that names the rails could rewrite them.
-    const rel = lc(path.relative(ctx.root, rp.skill));
-    return args.some((x) => /\s|[(;]/.test(x.text) && (lc(x.text).includes(rel) || HOOK_CONFIGS.some((f) => lc(x.text).includes(f)) || DISABLES_HOOKS.test(x.text))) ? "rails" : null;
-  }
-  for (const x of [...args, ...w.slice(0, k)]) {
-    if (programName(x.text) === "flow.mjs" || /\s/.test(x.text) || (!x.redir && /^-/.test(x.text) && !/^-[a-z]+:/i.test(x.text))) continue;
-    const p = resolve(x.text);
-    if (inside(p, rp.skill) || rp.configs.some((q) => lc(q) === lc(p))) return "rails";
-  }
-  return null;
-}
-
-// Commands that change whatever is piped into them (`find .flow | xargs rm`, `gci .flow | Remove-Item`).
-const PIPE_WRITERS = /^(xargs|parallel|remove-item|ri|rm|del|erase|rd|rmdir|move-item|mi|mv|move|rename-item|rni|set-content|sc|add-content|ac|clear-content|clc|out-file|copy-item|cpi|tee-object|tee|new-item|ni)$/;
-
-export function shellViolation(command, ps, ctx) {
-  const { cmds, failed } = shellCommands(command, { ps });
-  const found = new Set(cmds.flatMap((w) => [commandViolation(w), ctx && railsViolation(w, ctx)]).filter(Boolean));
-  const pipeWriter = (w) => {
-    const k = commandStart(w), name = programName(w[k].text);
-    if (!PIPE_WRITERS.test(name)) return false;
-    if (!/^(xargs|parallel)$/.test(name)) return true;
-    // xargs runs a program on what it reads: only readers (and echo) leave .flow/ alone.
-    let j = k + 1;
-    while (j < w.length && /^-/.test(w[j].text)) j += /^-[IndPLsEa]$/.test(w[j].text) ? 2 : 1;
-    const prog = j < w.length ? programName(w[j].text) : "echo";
-    return !(READERS.has(prog) && !READERS.get(prog)) && !["echo", "printf"].includes(prog);
-  };
-  const statePiped = cmds.some((w) => w.piped && pipeWriter(w)) && cmds.some((w) => w.some((x) => isStateWord(x.text, w.ps)));
-  if (statePiped) found.add("state");
-  if (failed) {
-    // Unreadable as shell: fall back to the raw text, conservatively.
-    if (/flow\.mjs["']?\s+(.*\s)?(approve|reject|suspend|unsuspend|hook|mcp)\b/i.test(command)) found.add("human");
-    if (/(^|[\s'"=:(/\\,])\.flow([\\/\s'")]|$)/i.test(command)) found.add("state");
-  }
-  if (failed && ctx && (/disableAllHooks/i.test(command) || lc(command).includes(lc(path.relative(ctx.root, skillDir))))) found.add("rails");
-  return ["human", "rails", "clean", "state"].find((v) => found.has(v)) || null;
-}
-
-// A line made only of reading commands (and flow.mjs agent commands), for when guards are unbound.
-function readOnly(command, ps) {
-  const { cmds, failed } = shellCommands(command, { ps });
-  if (failed) return false;
-  return cmds.every((w) => {
-    const k = commandStart(w), name = programName(w[k].text), args = w.slice(k + 1);
-    if (w.some((x) => x.redir)) return false;
-    if (name === "node" && args[0] && programName(args[0].text) === "flow.mjs") return true;
-    if (name === "git") return GIT_READS.has(args.find((x) => !/^-/.test(x.text))?.text) && !["add", "commit"].includes(args.find((x) => !/^-/.test(x.text))?.text);
-    if (["echo", "printf", "pwd", "true"].includes(name)) return true;
-    const flags = READERS.get(name);
-    return READERS.has(name) && !(flags && args.some((x) => flags.test(x.text)));
-  });
-}
-
 const RAILS_MSG = "the workflow's own rules (its playbooks, profile and scripts) and the hooks that enforce them change only while the user has suspended the rails. Stop and ask the user to run `flow suspend` first.";
 
-// Whether an edit of a hook settings file removes a flow.mjs hook or turns hooks off.
-function dropsHooks(abs, act) {
-  const { removed, added, whole } = act.change;
-  if (DISABLES_HOOKS.test(added) || DISABLES_HOOKS.test(whole ?? "")) return true;
-  if (/flow\.mjs/.test(removed)) return true;
-  if (whole === undefined) return false;
-  let before = "";
-  try { before = fs.readFileSync(abs, "utf8"); } catch { return false; }
-  return [...before.matchAll(/[^"'\n]*flow\.mjs[^"'\n]*/g)].some((m) => !whole.includes(m[0]));
+const STATE_MSG = "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
+const SHELL_MSG = {
+  human: "only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.",
+  rails: RAILS_MSG,
+  complex: "this command nests shells or scripts too deeply for the rails to check. Run it as simpler, separate commands.",
+  clean: "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.",
+  state: STATE_MSG,
+};
+const DELETING_TOOL = /delete|remove|rm|move|rename|clean|purge|unlink|trash/;
+
+// Checks that protect the rails themselves: the run state, the project bindings, the skill, the
+// hook settings and the human-only commands. They need no graph, so they hold even while the
+// graph is invalid.
+function railsCheck(act, g, root, cwd) {
+  const rp = railsPaths(root, skillDir);
+  const ctx = { root, cwd, skillDir };
+  const pathCheck = (abs, change) => {
+    const rel = relPath(root, abs);
+    if (samePath(rel, g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the user has suspended the rails. Stop and ask the user to run \`flow suspend\` first, or to edit the file themselves.`;
+    if (/^\.flow(\/|$)/i.test(rel)) return "the run state is written only by flow.mjs.";
+    if (inside(abs, rp.skill)) return RAILS_MSG;
+    if (rp.configs.some((q) => samePath(q, abs)) && (!change || dropsHooks(abs, { change }))) return RAILS_MSG;
+    return null;
+  };
+  if (act.kind === "edit") {
+    if (!act.paths.length) return "this edit names no file the rails can find, so it cannot be checked. Use the agent's own edit or write tool with a file path.";
+    for (const fp of act.paths) { const r = pathCheck(path.resolve(cwd, fp), act.change); if (r) return r; }
+    return null;
+  }
+  for (const line of act.lines || []) {
+    const v = shellViolation(line.command, line.ps, ctx);
+    if (v) return SHELL_MSG[v];
+  }
+  if (act.kind !== "other" || act.readOnly) return null;
+  if (act.code.some((c) => codeTouchesRails(c, ctx))) return `${STATE_MSG} The same holds for the workflow's own files and hook settings.`;
+  const deletes = DELETING_TOOL.test(act.name);
+  for (const t of act.values) {
+    const abs = path.resolve(cwd, t.replace(/^~(?=\/|\\|$)/, os.homedir()));
+    // An unknown tool may write any path it is given, and one that deletes takes what is below it.
+    const r = pathCheck(abs, null) || (deletes && [rp.state, rp.skill, ...rp.configs].some((q) => inside(q, abs)) ? RAILS_MSG : null);
+    if (r) return r;
+  }
+  return null;
 }
 
 function preToolUse(g, state, input, root) {
-  const rails = g.profile.rails || "standard";
-  if (!g.ok || state.suspended || rails === "advisory") return null;
+  const rails = railsLevel(g);
+  if (state.suspended || (g.ok && rails === "advisory")) return null;
   const act = toolAction(input);
+  const cwd = input.cwd || root;
+  const own = railsCheck(act, g, root, cwd);
+  if (own || !g.ok) return own;
   const run = state.run;
   const f = flowCmd(root);
 
   if (act.kind === "edit") {
-    const rp = railsPaths(root);
     for (const fp of act.paths) {
-      const abs = path.resolve(input.cwd || root, fp);
-      const rel = path.relative(root, abs).split(path.sep).join("/");
-      if (lc(rel) === lc(g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the user has suspended the rails. Stop and ask the user to run \`flow suspend\` first, or to edit the file themselves.`;
-      if (/^\.flow(\/|$)/i.test(rel)) return "the run state is written only by flow.mjs.";
-      if (inside(abs, rp.skill)) return RAILS_MSG;
-      if (rp.configs.some((q) => lc(q) === lc(abs)) && dropsHooks(abs, act)) return RAILS_MSG;
+      const rel = relPath(root, path.resolve(cwd, fp));
       if (rel.startsWith("..")) continue;
       if (!run) { if (rails === "strict") return `no playbook is active, so edits are blocked. Match the task to a playbook and run \`${f} start <playbook> --request "..."\`.`; continue; }
       if (run.paused && rails === "strict") return `the run is paused; \`${f} resume\` before editing.`;
@@ -801,19 +564,10 @@ function preToolUse(g, state, input, root) {
     return null;
   }
 
-  if (act.kind === "shell") {
-    const cmd = act.command;
-    const v = shellViolation(cmd, act.ps, { root, cwd: input.cwd || root });
-    if (v === "human") return "only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. Stop and ask the user.";
-    if (v === "rails") return RAILS_MSG;
-    if (v === "clean") return "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.";
-    if (v === "state") return "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
-    if (g.unboundGuards.length && !readOnly(cmd, act.ps)) {
-      return `guarded commands use ${g.unboundGuards.map((n) => `\${${n}}`).join(", ")}, which ${g.projectFile} does not bind, so they cannot be told apart from other commands. Only reading commands run until the user fills in those values.`;
-    }
+  for (const { command: cmd, ps } of act.lines || []) {
     for (const node of g.nodes.values()) {
       for (const pat of node.guards) {
-        if (!guardMatches(pat, cmd, { ps: act.ps })) continue;
+        if (!guardMatches(pat, cmd, { ps })) continue;
         if (!run || run.playbook !== node.id) return `\`${pat}\` is irreversible and runs only inside playbook ${node.id}, after its human gate. Current playbook: ${run ? run.playbook : "none"}.`;
         if (run.paused) return "the run is paused.";
         const step = guardedStep(node, run, pat);
@@ -830,7 +584,7 @@ function preToolUse(g, state, input, root) {
 const progress = (run) => JSON.stringify([run.playbook, run.steps, !!run.finished]);
 
 function stopCheck(g, state, input, root) {
-  const rails = g.profile.rails || "standard";
+  const rails = railsLevel(g);
   const run = state.run;
   if (!g.ok || state.suspended || rails === "advisory" || !run || input.stop_hook_active || run.paused || run.awaiting) return null;
   if (run.nudged === progress(run)) return null;
@@ -847,27 +601,29 @@ function stopCheck(g, state, input, root) {
 function context(input, text, format) {
   // hookSpecificOutput.additionalContext is understood by the agents that inject hook context.
   // Copilot CLI reads only a top-level additionalContext; VS Code reads hookSpecificOutput.
-  // Antigravity injects steps; an ephemeral message is shown to the model as a system message.
-  if (format === "antigravity") return JSON.stringify({ injectSteps: [{ ephemeralMessage: text }] });
   const out = { hookSpecificOutput: { hookEventName: input.hook_event_name || "SessionStart", additionalContext: text } };
   return JSON.stringify(format === "copilot" ? { additionalContext: text, ...out } : out);
 }
 
+// Exit code 2 with the reason on stderr is the common protocol. Copilot drops stderr and shows
+// only "hook exited with code 2", so it gets the reason as a structured deny instead.
+function blockTool(reason, format) {
+  if (format === "copilot") {
+    console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${tag} Blocked: ${reason}` } }));
+    return 0;
+  }
+  process.stderr.write(`${tag} Blocked: ${reason}\n`);
+  return 2;
+}
+
 function runHook(event, format) {
-  const input = normalizePayload(readStdin());
+  const input = readStdin();
   const root = findRoot(input.cwd || process.cwd());
   const g = loadGraph(root);
   const st = openStore(root);
   const state = st.load();
   if (event === "session-start") { console.log(context(input, describe(g, state, root), format)); return 0; }
   if (event === "user-prompt") {
-    if (format === "antigravity") {
-      // PreInvocation fires before every model call; inject once per turn, at its first call.
-      if (input.invocationNum !== 0) { console.log("{}"); return 0; }
-      const wait = state.run?.awaiting && !state.suspended ? `\n${tag} This agent cannot see chat replies to a gate: ask the user to run \`${flowCmd(root)} approve\` (or \`reject --reason "..."\`) in a terminal.` : "";
-      console.log(context(input, describe(g, state, root) + wait, format));
-      return 0;
-    }
     const p = String(input.prompt ?? input.user_prompt ?? input.message ?? "").trim();
     let note = "";
     if (g.ok && state.run?.awaiting && !state.suspended) {
@@ -882,32 +638,22 @@ function runHook(event, format) {
       }
     }
     // Without a run there is nothing to track on every prompt; session start already said how to begin.
-    if (!note && g.ok && !state.run && !state.suspended && (g.profile.rails || "standard") !== "strict") return 0;
+    if (!note && g.ok && !state.run && !state.suspended && railsLevel(g) !== "strict") return 0;
     console.log(context(input, note + describe(g, state, root), format));
     return 0;
   }
   if (event === "pre-tool-use") {
     const reason = preToolUse(g, state, input, root);
-    // Antigravity reads only a JSON decision and denies on anything else, even {}. "allow" still
-    // leaves its own permission prompts in place (checked against agy 1.3.3).
-    if (!reason) { if (format === "antigravity") console.log(JSON.stringify({ decision: "allow" })); return 0; }
+    if (!reason) return 0;
     st.log({ event: "block-tool", tool: input.tool_name, reason });
-    // Exit code 2 with the reason on stderr is the common protocol. Copilot drops stderr and shows
-    // only "hook exited with code 2", so it gets the reason as a structured deny instead.
-    if (format === "copilot") {
-      console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `${tag} Blocked: ${reason}` } }));
-      return 0;
-    }
-    if (format === "antigravity") { console.log(JSON.stringify({ decision: "deny", reason: `${tag} Blocked: ${reason}` })); return 0; }
-    process.stderr.write(`${tag} Blocked: ${reason}\n`);
-    return 2;
+    return blockTool(reason, format);
   }
   if (event === "stop") {
     const reason = stopCheck(g, state, input, root);
-    if (!reason) { if (format === "antigravity") console.log("{}"); return 0; }
+    if (!reason) return 0;
     st.save(state);
     st.log({ event: "block-stop", reason });
-    console.log(JSON.stringify({ decision: format === "antigravity" ? "continue" : "block", reason: `${tag} ${reason}` }));
+    console.log(JSON.stringify({ decision: "block", reason: `${tag} ${reason}` }));
     return 0;
   }
   console.error(`unknown hook event "${event}"`);
@@ -1065,7 +811,19 @@ export function serveMcp(input = process.stdin, output = process.stdout) {
 
 export function main(argv) {
   const [cmd, ...rest] = argv;
-  if (cmd === "hook") return runHook(rest[0], parseArgs(rest.slice(1)).o.format);
+  if (cmd === "hook") {
+    const format = parseArgs(rest.slice(1)).o.format;
+    try {
+      if (loadError) throw new Error(`the runtime did not load: ${loadError}`);
+      return runHook(rest[0], format);
+    } catch (e) {
+      // A crashed tool hook exits 1, which agents treat as "allow"; refuse the call instead.
+      if (rest[0] === "pre-tool-use") return blockTool(`the rails could not check this call (${e.message}). Stop and ask the user.`, format);
+      if (rest[0] === "session-start" || rest[0] === "user-prompt") console.log(context({ hook_event_name: rest[0] === "user-prompt" ? "UserPromptSubmit" : "SessionStart" }, `${tag} The rails are broken (${e.message}); every tool call is blocked until the user repairs the skill's scripts/.`, format));
+      return 0;
+    }
+  }
+  if (loadError) { console.error(`${tag} the runtime did not load: ${loadError}`); return 1; }
   if (cmd === "mcp") { serveMcp(); return undefined; }
   if (!cmd || cmd === "help" || cmd === "--help") {
     const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
