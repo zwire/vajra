@@ -2,11 +2,12 @@
 
 import { tag, RESOLVED, flowCmd } from "./env.mjs";
 import { allowedExits } from "./run.mjs";
+import { askAtGate } from "./reply.mjs";
 
 export function nextHint(node, run, root) {
   const f = flowCmd(root);
   if (run.paused) return `the run is paused (${run.paused.note}); continue with \`${f} resume\``;
-  if (run.awaiting) return `waiting for the human at step ${run.awaiting.step}; stop and ask them. They reply \`approve\` or \`reject <reason>\``;
+  if (run.awaiting) return `waiting for the human at step ${run.awaiting.step}; stop and ${askAtGate(run.awaiting.step)}`;
   const pending = node.steps.find((s) => run.steps[s.n].status === "pending");
   if (pending) {
     return pending.humanGate
@@ -22,11 +23,13 @@ export function nextHint(node, run, root) {
 export function describe(g, state, root) {
   const text = describeState(g, state, root);
   if (!state.request || state.suspended) return text;
-  return `${text}\n${tag} Waiting for the user to reply \`suspend\` (or \`reject <reason>\`) to your request to suspend the rails so you can ${state.request.reason}.`;
+  return `${text}\n${tag} Waiting for the user to answer your request to suspend the rails so you can ${state.request.reason}. ${SUSPEND_ANSWER}`;
 }
 
-// How the agent asks to change what only a suspended rail lets it change; the user answers in the chat.
-export const askToSuspend = (root, why = "<what you will change>") => `run \`${flowCmd(root)} request suspend --reason "${why}"\`, then stop and ask the user to reply \`suspend\``;
+// How the agent asks to change what only a suspended rail lets it change. Suspending turns every
+// check off, so the user's yes must name it.
+const SUSPEND_ANSWER = "They answer in their own words, naming it (\"yes, suspend\", \"中断していいよ\"), or \"no\"; or by a tap if you can show choices (AskUserQuestion, with a question that names suspending and the options Suspend and Reject).";
+export const askToSuspend = (root, why = "<what you will change>") => `run \`${flowCmd(root)} request suspend --reason "${why}"\`, then stop and ask the user whether to suspend the rails for that. ${SUSPEND_ANSWER.replace(/\.$/, "")}`;
 
 function describeState(g, state, root) {
   if (!g.ok) return `${tag} The workflow graph is invalid, so the rails are off until it validates: ${g.errors[0]}. To repair the skill, ${askToSuspend(root, "<what you will repair>")}.`;

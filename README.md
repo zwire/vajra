@@ -80,12 +80,12 @@ node <your-flow>/scripts/flow.mjs install --harness claude,codex,copilot   # any
 | You want to | Do this |
 |---|---|
 | Start a task on the workflow | Invoke your skill by name with the task |
-| Pass a human gate | When the agent stops at a gate, reply `approve` (optionally with a note) |
-| Refuse a gate | Reply `reject <reason>`; the agent takes the exit that fits |
-| Let the agent change the workflow itself (a playbook, the project's values, vajra Evolve) | When the agent asks to suspend the rails and says what it will change, reply `suspend` (or `reject <reason>`). It turns them back on when it is done |
+| Pass a human gate | When the agent stops at a gate, answer as you would anyone: "yes, go ahead", "LGTM", "はい、進めてください" (anything after it is kept as a note), or tap Approve if the agent shows the choice |
+| Refuse a gate | Say no ("no, not today", "いいえ、明日にして"); the agent takes the exit that fits |
+| Let the agent change the workflow itself (a playbook, the project's values, vajra Evolve) | When the agent asks to suspend the rails and says what it will change, say yes and name it ("yes, suspend", "中断していいよ"), or no. It turns them back on when it is done |
 | See where the run is, or what happened | Ask the agent; it runs `flow status` and `flow log` |
 
-Every decision is a chat reply, so a phone is enough, including for an agent running in the cloud. A word only counts as the whole start of your message, and only while the agent is waiting for that answer: `approve` passes a gate and never suspends the rails, `suspend` does nothing unless the agent asked. With the optional MCP server, clients that support elicitation show the same questions as a dialog to tap. If you do have a terminal, the same decisions work there: `node <your-flow>/scripts/flow.mjs approve --by <you>`, `reject --reason "..."`, `suspend` and `unsuspend`.
+Every decision is a chat reply, so a phone is enough, including for an agent running in the cloud. Your reply counts only while the agent is waiting for that answer, and only when it is clear: a message that opens with a yes or a no, in English or Japanese, where a yes is not hedged, conditioned or asked back ("ok, but first…", "yes?", "はい、でも待って" leave the question waiting, and the agent asks again). Suspending turns every check off, so a yes counts for it only when it names it; a plain "ok" never suspends the rails. Where the agent can show choices (Claude Code's AskUserQuestion) you can tap instead of typing, and Claude Code shows you a line confirming what you decided. With the optional MCP server, clients that support elicitation show the same questions as a dialog to tap. If you do have a terminal, the same decisions work there: `node <your-flow>/scripts/flow.mjs approve --by <you>`, `reject --reason "..."`, `suspend` and `unsuspend`.
 
 The agent's side (`flow start`, `step`, `finish`, `exit`) is written into your skill's `SKILL.md`, so you never type it. Your repository's commands and paths live in `.flow/your-flow/project.md`; commit it. Run state and history live next to it; commit them for an audit trail or ignore `.flow/*/state.json`, `log.jsonl` and `runs/`.
 
@@ -205,10 +205,10 @@ $ (agent) abctl ramp search-ranker-0412 --percent 1
 [search-ranking-flow] Blocked: `abctl ramp` belongs to step 4 and step 2 [human-gate] is not approved. Run `flow step 2`, then stop and ask the user.
 $ flow step 2
 STOP. Step 2 is a human gate: "The product owner approves the held-out evaluation and the 1% stage."
-Present what the user needs to decide, then end your turn. Only the user can pass it: they reply `approve` (or `reject <reason>`) in the chat, or run `flow approve` themselves.
+Present what the user needs to decide, then ask the user one yes-or-no question: may step 2 pass? They answer in their own words […]; end your turn. Only the user can pass it (or run `flow approve` themselves).
 $ (agent) flow approve
-[search-ranking-flow] Blocked: only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. At a human gate, stop and ask the user to reply `approve` or `reject <reason>`. […]
-> (user) approve, go to 1%
+[search-ranking-flow] Blocked: only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. At a human gate, stop and ask the user one yes-or-no question: may step <n> pass? […]
+> (user) yes, go to 1%
 [search-ranking-flow] The user approved step 2 of ab-ramp.
 $ (agent) abctl ramp search-ranker-0412 --percent 1                    # allowed
 $ flow step 3 --evidence "..."; flow step 4 --evidence "1% started"
@@ -222,8 +222,8 @@ $ (agent) abctl ramp search-ranker-0412 --percent 50
 |---|---|
 | Only declared exits, only after "Done when" | `flow exit` refuses anything else; `flow finish` needs every step recorded |
 | Checks decide the branch | `checks:` run on finish; exits marked `on: pass` / `on: fail` open accordingly |
-| Human gates pass only by the human | The prompt hook records `approve` / `reject` from the human's message, or the human runs `flow approve` in their own terminal; the agent's attempts are blocked |
-| Only the human switches the rails off | The agent asks with `flow request suspend --reason "..."`; the prompt hook suspends the rails only when the human then replies `suspend`. The agent turns them back on with `flow unsuspend` |
+| Human gates pass only by the human | The prompt hook reads a clear yes or no in the human's own message, the post-tool hook reads their pick in a choice dialog the agent could not pre-fill, or the human runs `flow approve` in their own terminal; the agent's attempts are blocked |
+| Only the human switches the rails off | The agent asks with `flow request suspend --reason "..."`; the prompt hook suspends the rails only when the human then says yes and names it (`suspend`, "yes, suspend", "中断していいよ"), or taps Suspend in a choice dialog that names it. The agent turns them back on with `flow unsuspend` |
 | Irreversible commands wait for their gate | The tool hook matches `irreversible:` patterns and checks the gate before the step the command belongs to. When steps behind different gates run the same command (two ramp stages), it is matched against each step's own command, and a later stage never passes on an earlier stage's approval |
 | Throwaway stays throwaway | `writes: [${scratch}/**]` limits edits while a throwaway playbook is active; `writes: []` makes a playbook read-only |
 | The agent stays oriented | Current playbook and next move are injected at session start and on every prompt during a run (Copilot CLI drops prompt-hook output, so there only at session start); stopping mid-playbook is bounced once per state of progress |

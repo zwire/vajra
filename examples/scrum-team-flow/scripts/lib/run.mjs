@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { now, RESOLVED, Stop, refuse } from "./env.mjs";
 import { commandMatches, fitsStep, gatesBefore } from "./match.mjs";
+import { askAtGate } from "./reply.mjs";
 
 function enterPlaybook(node) {
   return {
@@ -114,7 +115,7 @@ export function cmdStep(g, state, st, [nArg], o) {
     if (run.steps[n].status === "rejected") refuse(`step ${n} was rejected; finish the playbook and take the exit that fits`);
     run.awaiting = { step: n, since: now() };
     st.log({ event: "await", run: run.id, playbook: node.id, step: n });
-    throw new Stop(`STOP. Step ${n} is a human gate: "${gateText(s)}"\nPresent what the user needs to decide, then end your turn. Only the user can pass it: they reply \`approve\` (or \`reject <reason>\`) in the chat, or run \`flow approve\` themselves.`, 3);
+    throw new Stop(`STOP. Step ${n} is a human gate: "${gateText(s)}"\nPresent what the user needs to decide, then ${askAtGate(n)}; end your turn. Only the user can pass it (or run \`flow approve\` themselves).`, 3);
   }
   if (!o.evidence && !o.skip) throw new Stop(`usage: flow step ${n} --evidence "<what shows it>" | --skip "<reason>"`, 2);
   run.steps[n] = o.skip ? { status: "skipped", reason: o.skip, at: now() } : { status: "done", evidence: o.evidence, at: now() };

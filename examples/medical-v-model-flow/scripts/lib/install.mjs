@@ -24,6 +24,8 @@ const HARNESSES = {
     hooks: (scope) => (scope === "local" ? ".claude/settings.local.json" : ".claude/settings.json"),
     fromRoot: true,
     entry: (command) => ({ hooks: [{ type: "command", command }] }),
+    // The user's pick in an AskUserQuestion dialog answers a gate (lib/ask.mjs); only that tool.
+    extra: { "post-tool-use": ["PostToolUse", "AskUserQuestion"] },
     mcp: { file: ".mcp.json", format: "json" },
   },
   codex: {
@@ -71,8 +73,8 @@ export function install(root, o) {
     if (h.version) cfg.version ||= h.version;
     const events = (cfg.hooks ||= {});
     const changed = [];
-    for (const [ev, native] of Object.entries(EVENTS)) {
-      const entry = h.entry(`node ${target} hook ${ev} --agent ${name}`);
+    for (const [ev, [native, matcher]] of [...Object.entries(EVENTS).map(([e, n]) => [e, [n]]), ...Object.entries(h.extra || {})]) {
+      const entry = { ...(matcher ? { matcher } : {}), ...h.entry(`node ${target} hook ${ev} --agent ${name}`) };
       const before = JSON.stringify(events[native] || []);
       const list = (events[native] || [])
         .map((x) => (x.hooks ? { ...x, hooks: x.hooks.filter((y) => !ours(y.command)) } : x))

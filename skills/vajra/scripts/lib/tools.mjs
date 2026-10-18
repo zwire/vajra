@@ -49,7 +49,7 @@ function inputStrings(v, key = "", depth = 0, out = []) {
   return out;
 }
 
-function toolInput(input) {
+export function toolInput(input) {
   const ti = input.tool_input ?? input.toolInput ?? input.toolArgs ?? input.input ?? {};
   if (typeof ti !== "string") return ti || {};
   try { return JSON.parse(ti) || {}; } catch { return { input: ti }; }
