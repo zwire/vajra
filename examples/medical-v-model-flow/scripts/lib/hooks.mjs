@@ -182,8 +182,11 @@ export function runHook(event, input, root, opts = {}) {
     const p = String(input.prompt ?? input.user_prompt ?? input.message ?? "").trim();
     let note = "";
     let notice;
-    const r = g.ok && state.run?.awaiting && !state.suspended && pick(p, GATE);
+    const waits = g.ok && state.run?.awaiting && !state.suspended;
+    const r = waits && pick(p, GATE);
     if (r) ({ note, notice } = answerGate(st, state, r, "chat"));
+    // A host wrapper the rails cannot read (see humanText in reply.mjs) hides the pick: say so.
+    else if (waits && /^\s*</.test(p)) note = `${tag} The user's message reached the rails inside markup they cannot read, so a choice typed in it does not count here. Ask with your choice tool if you have one; otherwise tell the user that a typed choice cannot reach the rails from this chat.\n`;
     // Without a run there is nothing to track on every prompt; session start already said how to begin.
     if (!note && g.ok && !state.run && !state.suspended && railsLevel(g) !== "strict") return null;
     return { context: note + describe(g, state, root), event: event_, notice };

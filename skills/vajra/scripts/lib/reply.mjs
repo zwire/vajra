@@ -17,8 +17,24 @@ export function pick(text, choices, { numbers = true } = {}) {
   return null;
 }
 
-// A prompt the agent hands to another session must not pick a choice there (see protect.mjs).
-export const readsAsReply = (text) => !!(pick(text, GATE) || pick(text, SUSPEND));
+// What the human wrote in a prompt. A host that relays the human's message to the agent may wrap
+// it, along with other sessions' messages and its own notes; Claude's Projects threads send
+// <wake ...><message trigger="true" from="human" ...>text</message>...</wake>. Only the one
+// message the host marks as the human's, and as this turn's trigger, is theirs. A wrapper with no
+// such message holds nothing of theirs; a prompt with no wrapper is all theirs.
+const ENTITIES = { lt: "<", gt: ">", quot: '"', apos: "'", amp: "&" };
+export function humanText(prompt) {
+  const p = String(prompt ?? "");
+  if (!/^\s*<wake\b/.test(p)) return p;
+  const own = [...p.matchAll(/<message\b([^>]*)>([\s\S]*?)<\/message>/g)].filter(([, a]) => /\bfrom="human"/.test(a) && /\btrigger="true"/.test(a));
+  if (own.length !== 1) return "";
+  // Without its child elements (an edited message carries its <previous-body>).
+  return own[0][2].replace(/<([\w-]+)\b[^>]*>[\s\S]*?<\/\1>/g, "").replace(/&(lt|gt|quot|apos|amp);/g, (_, e) => ENTITIES[e]).trim();
+}
+
+// A prompt the agent hands to another session must not pick a choice there (see protect.mjs),
+// read as that session's hooks would read it.
+export const readsAsReply = (text) => !!(pick(humanText(text), GATE) || pick(humanText(text), SUSPEND));
 
 const listed = (choices) => choices.map((c, i) => `${i + 1}. ${c}`).join("  ");
 const asChoice = (choices) => `as a choice: with your choice tool if you have one (Claude Code: AskUserQuestion with exactly the options ${choices.join(" and ")}, and no answers of your own), otherwise by ending your message with "${listed(choices)}". The user picks one; only their pick counts`;

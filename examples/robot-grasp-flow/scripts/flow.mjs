@@ -51,7 +51,7 @@ import { fileURLToPath } from "node:url";
 
 // The rest of the runtime is loaded here rather than imported, so a missing or outdated file is
 // caught and the hook falls back to a plain text check instead of failing (see degradedHook).
-const REQUIRED = { "hooks.mjs": ["runHook"], "cli.mjs": ["execute"], "mcp.mjs": ["serveMcp"] };
+const REQUIRED = { "reply.mjs": ["humanText"], "hooks.mjs": ["runHook"], "cli.mjs": ["execute"], "mcp.mjs": ["serveMcp"] };
 let loadError = null;
 const lib = {};
 for (const [file, names] of Object.entries(REQUIRED)) {
@@ -106,9 +106,11 @@ function saveState(root, state, event) {
 // most needs to let the agent repair the skill.
 // The pick from the request's choices (1. Suspend  2. Reject; lib/reply.mjs reads them alike).
 // While a gate waits too, a number or `reject` answers the gate, so only the word picks Suspend.
+// With the runtime broken only the words count: the degraded hook cannot tell a bare number in a
+// prompt the agent hands to another session.
 function suspendPick(prompt, gateWaits) {
   const m = prompt.normalize("NFKC").trim().match(/^(suspend|reject|1|2)(?:[\s:,.!)-]+([\s\S]*))?$/i);
-  if (!m || (gateWaits && m[1].toLowerCase() !== "suspend")) return null;
+  if (!m || ((gateWaits || loadError) && !/^(suspend|reject)$/i.test(m[1])) || (gateWaits && /^reject$/i.test(m[1]))) return null;
   return { yes: /^(suspend|1)$/i.test(m[1]), rest: (m[2] || "").trim() };
 }
 const flowRel = (root) => {
@@ -274,11 +276,14 @@ export function main(argv) {
       }
     }
     // A reply to a suspend request is read before anything else, so it works with lib/ broken.
+    // Only what the human wrote is read, out of any wrapper the host put around it.
     let note = "";
     let notice;
     if (rest[0] === "user-prompt") {
+      const said = (lib.humanText ?? String)(String(input.prompt ?? input.user_prompt ?? input.message ?? ""));
+      input = { ...input, prompt: said, user_prompt: said, message: said };
       try {
-        const r = answerFromChat(root, String(input.prompt ?? input.user_prompt ?? input.message ?? ""));
+        const r = answerFromChat(root, said);
         ({ note, notice } = r);
         if (r.used) input = { ...input, prompt: "", user_prompt: "", message: "" };
       } catch {}
