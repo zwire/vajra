@@ -15,6 +15,7 @@ import { commandMatches } from "./match.mjs";
 
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish", "su"]);
 const POWERSHELLS = new Set(["pwsh", "powershell"]);
+const START_PARAM = /^-(file(path)?|argumentlist|args?|wait|nonewwindow|passthru|workingdirectory|windowstyle|verb|credential|redirectstandard\w*|loaduserprofile|usenewenvironment|environment|scriptblock|computername|session|asjob)$/i;
 const WRAPPERS = new Set(["sudo", "env", "exec", "nohup", "command", "time", "nice", "doas", "&", "."]);
 const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "time"]);
 // Past these limits a line is not read further but refused as too complex: scripts nested deeper
@@ -170,8 +171,9 @@ function readShell(s, depth, ps, ctx) {
         const c = w.findIndex((x, j) => j > k && /^-[a-z]*c[a-z]*$/i.test(x.text));
         if (c > 0 && w[c + 1]) nested.push({ text: w[c + 1].text, ps: false });
       } else if (POWERSHELLS.has(name)) {
-        // Every argument may be the script (-Command, or positional for powershell.exe); an encoded one is decoded.
-        nested.push({ text: rest(k + 1), ps: true });
+        // Every argument may start the script (-Command, or positional for powershell.exe, after any
+        // of its own parameters); an encoded one is decoded.
+        for (let j = k + 1; j < w.length; j++) nested.push({ text: rest(j), ps: true });
         for (let j = k + 1; j < w.length - 1; j++) {
           if (/^[-/](e|ec|en[a-z]*)$/i.test(w[j].text)) nested.push({ text: decodeEncodedCommand(w[j + 1].text), ps: true });
         }
@@ -183,8 +185,9 @@ function readShell(s, depth, ps, ctx) {
     if (head === "eval" || head === "watch") nested.push({ text: rest(commandStart(w) + 1), ps });
     if (["invoke-expression", "iex", "start-process", "saps", "start", "invoke-command", "icm"].includes(head)) {
       nested.push({ text: rest(commandStart(w) + 1), ps: true });
-      // Start-Process npm -ArgumentList 'run deploy' runs `npm run deploy`.
-      nested.push({ text: w.slice(commandStart(w) + 1).filter((x) => !/^-/.test(x.text)).map((x) => x.text.replace(/,/g, " ")).join(" "), ps: true });
+      // Start-Process npm -ArgumentList 'run deploy' runs `npm run deploy`; only its own parameters
+      // are dropped, so `-ArgumentList '-p','x'` keeps the program's `-p`.
+      nested.push({ text: w.slice(commandStart(w) + 1).filter((x) => !START_PARAM.test(x.text)).map((x) => x.text.replace(/,/g, " ")).join(" "), ps: true });
     }
     if (head === "ssh") for (let k = 1; k < w.length; k++) nested.push({ text: rest(k), ps });
   }

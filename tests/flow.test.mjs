@@ -194,6 +194,78 @@ test("a rejected gate skips the steps behind it", () => {
   assert.match(s, /\[-\] 3\..*gate rejected/);
 });
 
+test("the user passes a gate by picking a choice in the chat, by its number or its name", () => {
+  const waiting = (p) => /waiting for the human/.test(p.cli("status").stdout);
+  for (const prompt of ["1", "Approve", "approve, ship it", "1. 進めて", "１"]) {
+    const p = project();
+    toGate(p);
+    assert.match(p.hook("user-prompt", { prompt }).stdout, /The user approved step 2 of ship/, prompt);
+    assert.equal(p.bash("npm run deploy").status, 0, prompt);
+  }
+  for (const [prompt, why] of [["2", "no reason given"], ["reject: not today", "not today"], ["2 明日にして", "明日にして"]]) {
+    const p = project();
+    toGate(p);
+    assert.match(p.hook("user-prompt", { prompt }).stdout, /The user rejected step 2 of ship/, prompt);
+    assert.match(p.cli("status").stdout, new RegExp(`\\[!\\] 2\\..*${why}`), prompt);
+  }
+  // Nothing else is read as a pick: the gate waits.
+  const p = project();
+  toGate(p);
+  for (const prompt of ["yes", "ok", "はい、進めて", "approve? what would that do", "approved by whom", "please approve", "12", "1st", "suspend", ""]) {
+    assert.doesNotMatch(p.hook("user-prompt", { prompt }).stdout, /The user (approved|rejected)/, prompt);
+    assert.ok(waiting(p), prompt);
+  }
+  assert.equal(p.bash("npm run deploy").status, 2);
+});
+
+// Claude Code's AskUserQuestion: the hooks see the call before the dialog shows and its answers after.
+function dialog(p, id, questions, { answers, response } = {}) {
+  const tool_input = { questions, ...(answers ? { answers } : {}) };
+  const pre = p.hook("pre-tool-use", { hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: id, tool_input });
+  if (pre.status === 2) return { pre };
+  const post = p.hook("post-tool-use", { hook_event_name: "PostToolUse", tool_name: "AskUserQuestion", tool_use_id: id, tool_input, tool_response: response });
+  return { pre, post };
+}
+const gateQ = (question = "May step 2 (deploy) pass?", options = ["Approve", "Reject"]) => [{ question, header: "Gate", options: options.map((label) => ({ label })), multiSelect: false }];
+
+test("the user can answer a gate with a tap in the agent's choice dialog, and only the user", () => {
+  const p = project();
+  toGate(p);
+  const q = gateQ();
+  // A dialog that fills in its own answer never shows: the agent cannot answer for the user.
+  assert.match(dialog(p, "t1", q, { answers: { [q[0].question]: "Approve" } }).pre.stderr, /already carries answers/);
+  // An answer counts only for the call the hooks saw before the dialog showed.
+  p.hook("post-tool-use", { tool_name: "AskUserQuestion", tool_use_id: "forged", tool_input: { questions: q }, tool_response: { questions: q, answers: { [q[0].question]: "Approve" } } });
+  dialog(p, "t2", q, { response: "not json" });
+  p.hook("post-tool-use", { tool_name: "AskUserQuestion", tool_use_id: "t2", tool_input: { questions: q }, tool_response: { questions: q, answers: { [q[0].question]: "Approve" } } });
+  // A dialog that resolved itself while the user was away is no answer.
+  dialog(p, "t3", q, { response: { questions: q, answers: { [q[0].question]: "Approve" }, autoResolvedAfterMs: 60000 } });
+  // A question without exactly the gate's choices is about something else.
+  const other = gateQ("Which database should the spike use?", ["Approve Postgres", "Reject SQLite"]);
+  dialog(p, "t4", other, { response: { questions: other, answers: { [other[0].question]: "Approve Postgres" } } });
+  assert.match(p.cli("status").stdout, /waiting for the human/);
+  // The user's tap passes it, and the user is told (systemMessage, where the agent shows one).
+  const { post } = dialog(p, "t5", q, { response: { questions: q, answers: { [q[0].question]: "Approve" } } });
+  assert.match(post.stdout, /The user approved step 2 of ship/);
+  assert.match(p.cli("status").stdout, /approved by the user \(dialog\)/);
+  assert.equal(p.bash("npm run deploy").status, 0);
+  // The question may be in the user's language; the options are the gate's.
+  const r = project();
+  toGate(r);
+  const ja = gateQ("ステップ2のデプロイを進めてよいですか？");
+  dialog(r, "u1", ja, { response: { questions: ja, answers: { [ja[0].question]: "Reject" } } });
+  assert.match(r.cli("status").stdout, /\[!\] 2\..*rejected by the user \(dialog\)/);
+});
+
+test("the user's decision is shown to them where the agent shows hook messages", () => {
+  const p = project();
+  toGate(p);
+  const env = { ...process.env, CLAUDE_PROJECT_DIR: p.proj, FLOW_ROOT: "" };
+  const run = (agent, prompt) => JSON.parse(spawnSync(process.execPath, [path.join(p.skill, "scripts", "flow.mjs"), "hook", "user-prompt", "--agent", agent], { cwd: p.proj, encoding: "utf8", env, input: JSON.stringify({ cwd: p.proj, hook_event_name: "UserPromptSubmit", prompt }) }).stdout);
+  assert.equal(run("codex", "what is step 2?").systemMessage, undefined, "only Claude Code gets the extra field");
+  assert.match(run("claude", "1").systemMessage, /You approved step 2 of ship/);
+});
+
 test("guarded irreversible commands run only in their playbook after the gate", () => {
   const p = project();
   assert.equal(p.bash("npm run deploy").status, 2);
@@ -646,7 +718,9 @@ test("install writes hooks for each agent, and MCP only on request, idempotently
   const json = (f) => JSON.parse(fs.readFileSync(path.join(p.proj, f), "utf8"));
   const claude = json(".claude/settings.json");
   assert.deepEqual(claude.permissions, { allow: ["Bash(ls)"] });
-  for (const ev of ["SessionStart", "UserPromptSubmit", "PreToolUse", "Stop"]) assert.equal(claude.hooks[ev].length, 1, ev);
+  for (const ev of ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]) assert.equal(claude.hooks[ev].length, 1, ev);
+  assert.equal(claude.hooks.PostToolUse[0].matcher, "AskUserQuestion", "only the choice dialog runs the post-tool hook");
+  assert.equal(json(".codex/hooks.json").hooks.PostToolUse, undefined);
   const launch = (agent) => `node "$(node -p "process.env.CLAUDE_PROJECT_DIR||(require('child_process').spawnSync('git',['rev-parse','--show-toplevel'],{encoding:'utf8'}).stdout||'').trim()||'.'")/.claude/skills/demo-flow/scripts/flow.mjs" hook pre-tool-use --agent ${agent}`;
   assert.deepEqual(claude.hooks.PreToolUse[0], { hooks: [{ type: "command", command: launch("claude") }] });
   assert.equal(json(".codex/hooks.json").hooks.PreToolUse.length, 1);
@@ -702,6 +776,8 @@ test("Claude Code, Copilot and Codex share a repository in any install order", (
         assert.equal(r.status, 0, `${where}: copilot reading Claude's settings never errors: ${r.stderr}`);
         assert.equal(decision(r), own ? "allow" : "deny", `${where}: copilot reading Claude's settings`);
         assert.equal(decision(runInstalled(p, cmd, { cwd, input: ok })), "allow", `${where}: copilot reading Claude's settings`);
+        const post = runInstalled(p, hookOf(json(files.claude), "PostToolUse"), { cwd, input: { hook_event_name: "PostToolUse", toolName: "bash", toolArgs: "{}", toolResult: { resultType: "success" } } });
+        assert.equal(decision(post), "allow", `${where}: copilot running Claude's post-tool hook: ${post.stderr}`);
         const start = runInstalled(p, hookOf(json(files.claude), "SessionStart"), { cwd, input: { hook_event_name: "SessionStart" } });
         assert.equal(start.status, 0, `${where}: ${start.stderr}`);
         if (own) assert.equal(start.stdout, "", `${where}: session context comes once, from Copilot's own hook`);
@@ -905,12 +981,12 @@ test("an invalid graph refuses to run but does not block the harness", () => {
 const ctxOf = (r) => (r.stdout ? JSON.parse(r.stdout).hookSpecificOutput.additionalContext : "");
 const stateOf = (p) => JSON.parse(fs.readFileSync(path.join(p.proj, ".flow", "demo-flow", "state.json"), "utf8"));
 
-test("the user suspends the rails by replying `suspend` to the agent's request, with no terminal", () => {
+test("the user suspends the rails by picking Suspend when the agent asks, with no terminal", () => {
   const p = project();
   const flow = path.relative(p.proj, path.join(p.skill, "scripts", "flow.mjs"));
   const playbook = ".claude/skills/demo-flow/playbooks/ship.md";
   // The refusal tells the agent how to ask.
-  assert.match(p.write(playbook).stderr, /request suspend --reason .*reply `suspend`/);
+  assert.match(p.write(playbook).stderr, /request suspend --reason .*1\. Suspend  2\. Reject/);
   // Without a request, a message that starts with "suspend" changes nothing.
   p.hook("user-prompt", { prompt: "suspend" });
   assert.equal(p.write(playbook).status, 2);
@@ -920,20 +996,39 @@ test("the user suspends the rails by replying `suspend` to the agent's request, 
   assert.equal(ask.status, 3);
   assert.match(ask.stdout, /STOP\. Ask the user to suspend the rails so you can add a check to ship\./);
   assert.equal(stateOf(p).suspended, false, "asking suspends nothing");
-  assert.match(ctxOf(p.hook("session-start", {})), /Waiting for the user to reply `suspend`/);
-  // `approve` is a gate's answer: it does not suspend the rails.
-  assert.match(ctxOf(p.hook("user-prompt", { prompt: "approve" })), /suspended only by the reply `suspend`, so they are still on/);
+  assert.match(ctxOf(p.hook("session-start", {})), /Waiting for the user to answer your request to suspend the rails/);
+  // `approve` is a gate's choice: it does not suspend the rails.
+  assert.match(ctxOf(p.hook("user-prompt", { prompt: "approve" })), /suspended only by picking Suspend, so they are still on/);
+  for (const prompt of ["please suspend", "suspend?", "ok", "yes"]) p.hook("user-prompt", { prompt });
   assert.equal(p.write(playbook).status, 2);
-  for (const prompt of ["please suspend", "suspend?"]) p.hook("user-prompt", { prompt });
-  assert.equal(p.write(playbook).status, 2);
-  // The user's reply suspends them.
-  assert.match(ctxOf(p.hook("user-prompt", { prompt: "suspend" })), /The user suspended the rails so you can add a check to ship\. Do only that, then run `node .*flow\.mjs unsuspend`/);
+  // The user's pick suspends them.
+  assert.match(ctxOf(p.hook("user-prompt", { prompt: "1" })), /The user suspended the rails so you can add a check to ship\. Do only that, then run `node .*flow\.mjs unsuspend`/);
   assert.equal(p.write(playbook).status, 0);
   assert.match(fs.readFileSync(path.join(p.proj, ".flow", "demo-flow", "log.jsonl"), "utf8"), /"event":"suspend","by":"the user \(chat\)"/);
   // Turning them back on only tightens them, so the agent does it itself.
   assert.equal(p.bash(`node ${flow} unsuspend`).status, 0);
   assert.equal(p.cli("unsuspend").status, 0);
   assert.equal(p.write(playbook).status, 2);
+});
+
+test("the user can answer a suspend request with a tap, and a tap on another question never suspends", () => {
+  const p = project();
+  const playbook = ".claude/skills/demo-flow/playbooks/ship.md";
+  p.cli("request", "suspend", "--reason", "add a check to ship");
+  const other = [{ question: "Which check should ship run?", options: [{ label: "Yes, the unit tests" }, { label: "No check" }] }];
+  dialog(p, "s1", other, { response: { questions: other, answers: { [other[0].question]: "Yes, the unit tests" } } });
+  assert.equal(stateOf(p).suspended, false);
+  const q = [{ question: "Suspend the rails so I can add a check to ship?", options: [{ label: "Suspend" }, { label: "Reject" }] }];
+  assert.match(dialog(p, "s2", q, { answers: { [q[0].question]: "Suspend" } }).pre.stderr, /already carries answers/);
+  assert.equal(stateOf(p).suspended, false);
+  const { post } = dialog(p, "s3", q, { response: { questions: q, answers: { [q[0].question]: "Suspend" } } });
+  assert.match(post.stdout, /The user suspended the rails so you can add a check to ship/);
+  assert.equal(p.write(playbook).status, 0);
+  p.cli("unsuspend");
+  p.cli("request", "suspend", "--reason", "again");
+  dialog(p, "s4", q, { response: { questions: q, answers: { [q[0].question]: "Reject" } } });
+  assert.equal(stateOf(p).request, null);
+  assert.equal(stateOf(p).suspended, false);
 });
 
 test("a suspend request is refused with `reject`, withdrawn by the agent, and never answered by a gate's reply", () => {
@@ -998,6 +1093,16 @@ test("the agent cannot hand a reply to another agent session, now or later", () 
     "sleep 5 && claude -p approve &", "/usr/local/bin/codex exec 'approve'", "timeout 60 claude -p approve", "echo approve | xargs claude -p", "claude -p \"$(cat reply.txt)\"", "bash -c 'claude -p approve'",
   ]) assert.match(p.bash(c).stderr, /hand a prompt to an agent session/, c);
   assert.equal(ps('"approve" | claude -p').status, 2);
+  // PowerShell that starts the agent behind its own parameters.
+  for (const c of ["Start-Process claude -ArgumentList '-p','approve'", "Start-Process -FilePath codex -ArgumentList 'exec','2' -Wait", `pwsh -c "claude -p 'approve'"`, `pwsh -NoProfile -Command "claude -p 'suspend'"`, "powershell -ExecutionPolicy Bypass -Command claude -p 1"]) {
+    assert.equal(ps(c).status, 2, c);
+  }
+  assert.equal(ps("Start-Process npm -ArgumentList 'run','build' -Wait").status, 0);
+  // A choice's number picks it too.
+  for (const c of ["claude -p 1", "codex exec '2: not today'", "copilot -p 'Suspend'"]) {
+    assert.match(p.bash(c).stderr, /hand a prompt to an agent session/, c);
+  }
+  for (const c of ["claude -p yes", "claude -p 'continue the refactor in src/'", "codex exec 'yes-or-no: does the diff add tests? answer in one word'", "claude -p 'summarize why we said no to X'"]) assert.equal(p.bash(c).status, 0, c);
   for (const c of ["codex exec \"review the diff for bugs\"", "claude -p \"summarize README.md\" > notes.txt", "claude --version", "claude mcp list", "copilot -p 'explain this error: approve failed'", "git commit -m \"claude -p approve no longer works\"", "cat notes.md | grep claude", "echo claude approve"]) {
     assert.equal(p.bash(c).status, 0, c);
   }
@@ -1007,6 +1112,7 @@ test("the agent cannot hand a reply to another agent session, now or later", () 
   assert.equal(pre("ScheduleWakeup", { delaySeconds: 60, prompt: " suspend" }), 2);
   assert.equal(pre("mcp__remote__send_message", { session_id: "x", message: "approve, go" }), 2);
   assert.equal(pre("CronCreate", { cron: "0 9 * * *", prompt: "check CI and report" }), 0);
+  assert.equal(pre("CronCreate", { cron: "*/5 * * * *", prompt: "1" }), 2);
   assert.equal(pre("Task", { description: "review", prompt: "Approve or reject this diff and say why" }), 0, "a subagent's prompt is not a user prompt");
   assert.equal(pre("mcp__git__git_commit", { repo_path: ".", message: "Reject empty names" }), 0);
 });

@@ -20,16 +20,16 @@
 //   flow request suspend --reason "<what you need to change>"   ask the user to suspend the rails
 //   flow request cancel                                         withdraw that request
 //   flow unsuspend                                              turn the rails back on
-// The human decides in the chat: they reply `approve` or `reject <reason>` at a [human-gate], and
-// `suspend` (or `reject <reason>`) to a suspend request; the prompt hook records the reply, because
-// only the human writes prompts. With the MCP server, a client that supports elicitation asks them
-// in a dialog instead. Nothing needs a terminal, though these still work in the human's own one
+// The human decides by picking a choice: Approve or Reject at a [human-gate], Suspend or Reject for
+// a suspend request. They tap it in the agent's choice dialog (lib/ask.mjs) or an elicitation dialog
+// (the MCP server), or reply with its number or name in the chat (lib/reply.mjs), which the prompt
+// hook records, because only the human writes prompts. Nothing needs a terminal, though these still work in the human's own one
 // (the hooks block the agent from running them):
 //   flow approve [--by <name>] [--note <text>]    resume the interrupted [human-gate]
 //   flow reject --reason <text>                   refuse it
 //   flow suspend                                  turn the hooks off until flow unsuspend
 // Integration:
-//   flow hook <session-start|user-prompt|pre-tool-use|stop> [--agent claude|codex|copilot]
+//   flow hook <session-start|user-prompt|pre-tool-use|post-tool-use|stop> [--agent claude|codex|copilot]
 //                                                 lifecycle hook (JSON on stdin)
 //   flow install --harness <claude|codex|copilot>[,...]
 //                [--scope project|local] [--mcp] [--dry-run]
@@ -98,15 +98,19 @@ function saveState(root, state, event) {
 }
 
 // ---------- suspending the rails ----------
-// Suspending turns every hook off, so only the human does it: by replying `suspend` in the chat
-// after the agent asked with `flow request suspend`, through an elicitation dialog, or with
-// `flow suspend` in their own terminal. The reply names the action, so a user who means to pass a
-// gate with `approve` never suspends the rails by mistake, and an agent cannot pass one off as the
-// other. Turning the rails back on only tightens them, so the agent may run `flow unsuspend`.
+// Suspending turns every hook off, so only the human does it: by picking Suspend when the agent
+// asks with `flow request suspend` (in the chat, `suspend` or `1`; or in a choice or elicitation
+// dialog), or with `flow suspend` in their own terminal. Turning the rails back on only tightens
+// them, so the agent may run `flow unsuspend`.
 // This lives here, not in lib/, because it must work while lib/ is broken: that is when the user
 // most needs to let the agent repair the skill.
-const SUSPEND_REPLY = /^suspend(?:[\s:,.!-]+(.*))?$/is;
-const REJECT_REPLY = /^reject(?:[\s:,.!-]+(.*))?$/is;
+// The pick from the request's choices (1. Suspend  2. Reject; lib/reply.mjs reads them alike).
+// While a gate waits too, a number or `reject` answers the gate, so only the word picks Suspend.
+function suspendPick(prompt, gateWaits) {
+  const m = prompt.normalize("NFKC").trim().match(/^(suspend|reject|1|2)(?:[\s:,.!)-]+([\s\S]*))?$/i);
+  if (!m || (gateWaits && m[1].toLowerCase() !== "suspend")) return null;
+  return { yes: /^(suspend|1)$/i.test(m[1]), rest: (m[2] || "").trim() };
+}
 const flowRel = (root) => {
   const rel = relPath(root, path.join(here, "flow.mjs"));
   return `node ${rel.startsWith("..") ? path.join(here, "flow.mjs") : rel}`;
@@ -120,7 +124,7 @@ export const suspension = {
     if (typeof reason !== "string" || !reason.trim()) return { code: 2, text: 'usage: flow request suspend --reason "<what you need to change, and why>"' };
     state.request = { action: "suspend", reason: reason.trim(), since: new Date().toISOString() };
     saveState(root, state, { event: "request", action: "suspend", reason: state.request.reason });
-    return { code: 3, text: `STOP. Ask the user to suspend the rails so you can ${state.request.reason}.\nWhile they are suspended nothing is enforced: guarded commands run and every file may change, until you run \`${flowRel(root)} unsuspend\`. Tell the user what you will change, then end your turn. Only the user can allow it: they reply \`suspend\` (or \`reject <reason>\`), or run \`flow suspend\` themselves.` };
+    return { code: 3, text: `STOP. Ask the user to suspend the rails so you can ${state.request.reason}.\nWhile they are suspended nothing is enforced: guarded commands run and every file may change, until you run \`${flowRel(root)} unsuspend\`. Tell the user what you will change, then end your turn. Only the user can allow it: ask them to pick Suspend or Reject: with your choice tool if you have one (AskUserQuestion, with a question that names suspending), otherwise by ending your message with "1. Suspend  2. Reject". Or they run \`flow suspend\` themselves.` };
   },
   cancel(root) {
     const state = loadState(root);
@@ -153,14 +157,10 @@ export const suspension = {
 function answerFromChat(root, prompt) {
   const state = loadState(root);
   if (!state.request || state.suspended) return { note: "", used: false };
-  const p = prompt.trim();
-  const yes = p.match(SUSPEND_REPLY);
-  if (yes) return { note: suspension.grant(root, "the user (chat)", (yes[1] || "").trim()), used: true };
-  // While a gate waits too, `approve` and `reject` answer the gate.
-  if (state.run?.awaiting) return { note: "", used: false };
-  const no = p.match(REJECT_REPLY);
-  if (no) return { note: suspension.refuse(root, "the user (chat)", (no[1] || "").trim()), used: true };
-  if (/^approve\b/i.test(p)) return { note: `${tag} The user replied \`approve\`, but the rails are suspended only by the reply \`suspend\`, so they are still on. If you still need it, say what you will change and ask again.`, used: true };
+  const r = suspendPick(prompt, !!state.run?.awaiting);
+  if (r?.yes) return { note: suspension.grant(root, "the user (chat)", r.rest), used: true, notice: `${tag} You suspended the rails so the agent can ${state.request.reason}.` };
+  if (r) return { note: suspension.refuse(root, "the user (chat)", r.rest), used: true, notice: `${tag} You kept the rails on.` };
+  if (!state.run?.awaiting && /^\s*approve\b/i.test(prompt)) return { note: `${tag} The user replied \`approve\`, but the rails are suspended only by picking Suspend, so they are still on. If you still need it, say what you will change and ask again.`, used: true };
   return { note: "", used: false };
 }
 
@@ -180,11 +180,14 @@ function blockTool(reason) {
   return 0;
 }
 
-function answer(v, format) {
+// notice: a line for the user. Only Claude Code's hooks are known to show it (systemMessage); the
+// other agents get the context alone, so an unknown field never breaks them.
+function answer(v, format, agent) {
   if (!v) return 0;
+  const shown = agent === "claude" && format !== "copilot" && v.notice ? { systemMessage: v.notice } : {};
   if (v.deny) return blockTool(v.deny);
   if (v.block) console.log(JSON.stringify({ decision: "block", reason: `${tag} ${v.block}` }));
-  else if (v.context !== undefined) console.log(context(v.event, v.context, format));
+  else if (v.context !== undefined) console.log(JSON.stringify({ ...JSON.parse(context(v.event, v.context, format)), ...shown }));
   else if (v.unknown !== undefined) console.error(`unknown hook event "${v.unknown}"`);
   return 0;
 }
@@ -220,7 +223,7 @@ function degradedHook(event, e, input, raw, root, format, note = "") {
     return 0;
   }
   if ((event === "session-start" || event === "user-prompt") && (note || !suspended)) {
-    const degraded = suspended ? "" : `${tag} The rails are degraded (${e.message}): only calls that name the workflow's own files are blocked. Tell the user, who can copy the runtime from vajra again. To repair it yourself, run \`${flowRel(root)} request suspend --reason "<what you will repair>"\` and ask the user to reply \`suspend\`.`;
+    const degraded = suspended ? "" : `${tag} The rails are degraded (${e.message}): only calls that name the workflow's own files are blocked. Tell the user, who can copy the runtime from vajra again. To repair it yourself, run \`${flowRel(root)} request suspend --reason "<what you will repair>"\` and ask the user to pick Suspend or Reject ("1. Suspend  2. Reject").`;
     console.log(context(event === "user-prompt" ? "UserPromptSubmit" : "SessionStart", [note, degraded].filter(Boolean).join("\n"), format));
   }
   return 0;
@@ -272,10 +275,11 @@ export function main(argv) {
     }
     // A reply to a suspend request is read before anything else, so it works with lib/ broken.
     let note = "";
+    let notice;
     if (rest[0] === "user-prompt") {
       try {
         const r = answerFromChat(root, String(input.prompt ?? input.user_prompt ?? input.message ?? ""));
-        note = r.note;
+        ({ note, notice } = r);
         if (r.used) input = { ...input, prompt: "", user_prompt: "", message: "" };
       } catch {}
     }
@@ -283,8 +287,8 @@ export function main(argv) {
       if (loadError) throw new Error(`the runtime did not load: ${loadError}`);
       // Only Claude Code itself runs Bash in a POSIX shell on Windows; see lib/tools.mjs.
       const v = lib.runHook(rest[0], input, root, { bashIsPosix: agent === "claude" && format !== "copilot" });
-      if (!note) return answer(v, format);
-      return answer({ context: [note, v?.context].filter(Boolean).join("\n"), event: v?.event || input.hook_event_name || "UserPromptSubmit" }, format);
+      if (!note) return answer(v, format, agent);
+      return answer({ context: [note, v?.context].filter(Boolean).join("\n"), event: v?.event || input.hook_event_name || "UserPromptSubmit", notice: [notice, v?.notice].filter(Boolean).join(" ") }, format, agent);
     } catch (e) {
       return degradedHook(rest[0], e, input, raw, root, format, note);
     }

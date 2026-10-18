@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { shellCommands, programName, commandStart } from "./shell.mjs";
 import { HOOK_CONFIGS, DISABLES_HOOKS, railsPaths, inside, samePath } from "./settings.mjs";
+import { readsAsReply } from "./reply.mjs";
 
 // Whether code for an interpreter names the run state or the rails: any mention counts, as it
 // can open any path. ctx = { root, skillDir }.
@@ -137,17 +138,16 @@ function copyDestination(name, args) {
 }
 
 // ---------- prompts the agent could put in the human's place ----------
-// The human answers a gate or a suspend request with a prompt that starts with one of these words.
-// A prompt the agent writes must not start with one, wherever it would be submitted: to another
-// agent session it starts (whose hooks are this skill's, so its prompt would count as the human's),
-// or to one it schedules or sends.
-export const REPLY_WORD = /^\s*(approve|reject|suspend)(?![\w-])/i;
+// The human answers a gate or a suspend request in their own words (see reply.mjs). A prompt the
+// agent writes must not read as such an answer, wherever it would be submitted: to another agent
+// session it starts (whose hooks are this skill's, so its prompt would count as the human's), or to
+// one it schedules or sends.
 const AGENT_CLIS = new Set(["claude", "codex", "copilot"]);
 const RUNNERS = new Set(["timeout", "gtimeout", "xargs", "setsid", "stdbuf", "unbuffer", "caffeinate", "npx", "bunx", "pnpx"]);
 const AGENT_PACKAGE = /(^|[/@\\])(anthropic-ai[/\\]claude-code|openai[/\\]codex|github[/\\]copilot)([@/\\]|$)/i;
 
 // Whether a simple command starts an agent session whose prompt could be a reply: one given as an
-// argument that starts with a reply word, or one the rails cannot read (a variable, a substitution,
+// argument that reads as an answer ("approve", "yes", "ok", "いいよ"), or one the rails cannot read (a variable, a substitution,
 // stdin from a pipe, a heredoc or a file). `codex exec "review the diff"` runs.
 function nestedAgent(w) {
   const { k, name } = head(w);
@@ -157,7 +157,7 @@ function nestedAgent(w) {
   if (at < 0) return false;
   const args = w.slice(at + 1);
   if (w.piped || w.fed || args.some((x) => typeof x.redir === "string" && x.redir.startsWith("<"))) return true;
-  return args.some((x) => !x.redir && (REPLY_WORD.test(x.text) || /[$`]/.test(x.text)));
+  return args.some((x) => !x.redir && (readsAsReply(x.text) || /[$`]/.test(x.text)));
 }
 
 function commandViolation(w, ctx) {
