@@ -9,20 +9,20 @@
 // question waits for the chat reply as before.
 
 import { toolInput } from "./tools.mjs";
-import { NAMES_SUSPEND } from "./reply.mjs";
+import { GATE, SUSPEND } from "./reply.mjs";
 
 const ASK_TOOLS = new Set(["askuserquestion"]);
 const isAsk = (input) => ASK_TOOLS.has(String(input.tool_name || input.toolName || "").toLowerCase());
 const callId = (input) => input.tool_use_id || input.toolUseId || null;
 const questions = (ti) => (Array.isArray(ti?.questions) ? ti.questions.filter((q) => q && typeof q.question === "string") : []);
+const labels = (q) => (Array.isArray(q.options) ? q.options.map((o) => String(o?.label ?? o).trim().toLowerCase()).join("|") : "");
 
-// Which waiting question a dialog question asks: the gate when it names the gate's step, the
-// suspend request when it names suspending.
+// Which waiting question a dialog question asks, by its options: exactly the gate's choices, or
+// the suspend request's.
 function kindOf(q, state) {
-  const text = `${q.header || ""} ${q.question}`;
-  const n = state.run?.awaiting?.step;
-  if (n !== undefined && new RegExp(`\\bstep\\s*${n}(?!\\d)|ステップ\\s*${n}(?!\\d)`, "i").test(text)) return "gate";
-  if (state.request && NAMES_SUSPEND.test(text)) return "suspend";
+  const l = labels(q);
+  if (state.run?.awaiting && l === GATE.join("|").toLowerCase()) return "gate";
+  if (state.request && l === SUSPEND.join("|").toLowerCase()) return "suspend";
   return null;
 }
 

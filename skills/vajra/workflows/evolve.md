@@ -4,7 +4,7 @@ Change an existing generated skill without losing what already works. Copy these
 
 ## 1. Load the current state
 
-- If the skill's hooks are installed, its own files are protected from the agent. Before you edit, run `node <skill-dir>/scripts/flow.mjs request suspend --reason "<the change>"`, say what you will change, and end your turn; the user answers yes, naming the suspension ("yes, suspend"), or taps Suspend if you show the choice. When you are done, run `node <skill-dir>/scripts/flow.mjs unsuspend`.
+- If the skill's hooks are installed, its own files are protected from the agent. Before you edit, run `node <skill-dir>/scripts/flow.mjs request suspend --reason "<the change>"`, say what you will change, ask the user to pick Suspend or Reject, and end your turn. When you are done, run `node <skill-dir>/scripts/flow.mjs unsuspend`.
 - Read the skill's `profile.md`, `SKILL.md`, `bindings.md`, `graph.md`, the playbooks named in the request, and the project file `.flow/<name>/project.md`.
 - Run `node scripts/validate.mjs <skill-dir> --project <project-root>` to confirm the starting point is valid. If it is not, fix the existing errors first and say so.
 - If the validator reports an outdated `schema`, migrate first: apply each step in [../references/graph-model.md](../references/graph-model.md#schema-versions) from the skill's schema up to the current one, then set `schema` and `generator` in `profile.md`. Record the migration in `## History`.

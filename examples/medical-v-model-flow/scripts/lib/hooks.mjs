@@ -10,7 +10,7 @@ import { globToRegExp, stepCommands } from "./match.mjs";
 import { guardMatches } from "./shell.mjs";
 import { toolAction } from "./tools.mjs";
 import { shellViolation, codeTouchesRails } from "./protect.mjs";
-import { readReply, readSuspendReply, readsAsReply, askAtGate } from "./reply.mjs";
+import { pick, readsAsReply, askAtGate, GATE, SUSPEND } from "./reply.mjs";
 import { beforeAsk, afterAsk } from "./ask.mjs";
 import { dropsHooks, railsPaths, inside, samePath } from "./settings.mjs";
 import { openStore } from "./store.mjs";
@@ -24,7 +24,7 @@ const STATE_MSG = "the run state and project bindings in .flow/ are changed only
 const SHELL_MSG = {
   human: (root) => `only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. At a human gate, stop and ${askAtGate()}. To change the workflow's own files, ${askToSuspend(root)}.`,
   rails: railsMsg,
-  agent: () => "this would hand a prompt to an agent session that the rails cannot tell from the user's own: one that reads as an answer (`approve`, `yes`, `ok`, `no`, `suspend`), or that the rails cannot read (a variable, stdin). Its hooks are this workflow's, so it could answer a human gate or a suspend request in the user's place. Write the prompt as a plain task that does not open with a yes or a no, or ask the user.",
+  agent: () => "this would hand a prompt to an agent session that the rails cannot tell from the user's own: one that picks a choice (`approve`, `reject`, `suspend`, `1`, `2`), or that the rails cannot read (a variable, stdin). Its hooks are this workflow's, so it could answer a human gate or a suspend request in the user's place. Write the prompt as a plain task that does not start with those, or ask the user.",
   complex: "this command nests shells or scripts too deeply for the rails to check. Run it as simpler, separate commands.",
   clean: "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.",
   state: STATE_MSG,
@@ -135,37 +135,35 @@ function stopCheck(g, state, input, root) {
   return `${where}. Next: ${nextHint(node, run, root)}. If you must stop (for example to ask the user something), run \`${f} pause --note "<why>"\` first.`;
 }
 
-// Records the user's answer to the waiting gate; `via` says where it came from (chat or dialog).
+// Records the user's pick at the waiting gate; `via` says where it came from (chat or dialog).
 function answerGate(st, state, r, via) {
   const { run } = state;
+  const yes = r.choice === "Approve";
   const by = `the user (${via})`;
-  const n = r.answer === "yes" ? approve(state, by, r.rest) : reject(state, by, r.rest);
+  const n = yes ? approve(state, by, r.rest) : reject(state, by, r.rest);
   st.save(state);
-  st.log({ event: r.answer === "yes" ? "approve" : "reject", run: run.id, playbook: run.playbook, step: n, by: `user-${via}`, text: r.rest.slice(0, 200) });
-  const what = `${r.answer === "yes" ? "approved" : "rejected"} step ${n} of ${run.playbook}`;
+  st.log({ event: yes ? "approve" : "reject", run: run.id, playbook: run.playbook, step: n, by: `user-${via}`, text: r.rest.slice(0, 200) });
+  const what = `${yes ? "approved" : "rejected"} step ${n} of ${run.playbook}`;
   return { note: `${tag} The user ${what}.\n`, notice: `${tag} You ${what}${r.rest ? `: ${r.rest.slice(0, 120)}` : ""}.` };
 }
 
-function gateFromDialog(st, state, text) {
-  if (!state.run?.awaiting) return null;
-  const r = readReply(text);
-  return r.answer ? answerGate(st, state, r, "dialog") : null;
-}
-
-// The dialog's question named the suspension, so a plain yes in it answers that.
-function suspendFromDialog(st, state, text, root) {
-  if (!state.request || state.suspended) return null;
-  const named = readSuspendReply(text);
-  const r = named.answer ? named : readReply(text);
-  if (!r.answer) return null;
+function suspendFromDialog(st, state, r, root) {
   const { reason } = state.request;
+  const yes = r.choice === "Suspend";
   state.request = null;
-  if (r.answer === "yes") state.suspended = true;
+  state.suspended = yes;
   st.save(state);
-  st.log({ event: r.answer === "yes" ? "suspend" : "reject-request", by: "the user (dialog)", reason, ...(r.rest ? { note: r.rest } : {}) });
-  return r.answer === "yes"
+  st.log({ event: yes ? "suspend" : "reject-request", by: "the user (dialog)", reason, ...(r.rest ? { note: r.rest } : {}) });
+  return yes
     ? { note: `${tag} The user suspended the rails so you can ${reason}. Do only that, then run \`${flowCmd(root)} unsuspend\`.\n`, notice: `${tag} You suspended the rails so the agent can ${reason}.` }
     : { note: `${tag} The user did not suspend the rails${r.rest ? `: ${r.rest}` : ""}. Carry on without changing the workflow's own files.\n`, notice: `${tag} You kept the rails on.` };
+}
+
+// The user's pick in a choice dialog, for the question it asked.
+function fromDialog(g, st, state, { kind, text }, root) {
+  if (kind === "gate" && g.ok && state.run?.awaiting) { const r = pick(text, GATE); return r && answerGate(st, state, r, "dialog"); }
+  if (kind === "suspend" && state.request && !state.suspended) { const r = pick(text, SUSPEND); return r && suspendFromDialog(st, state, r, root); }
+  return null;
 }
 
 // What a hook answers, or null for nothing:
@@ -184,11 +182,8 @@ export function runHook(event, input, root, opts = {}) {
     const p = String(input.prompt ?? input.user_prompt ?? input.message ?? "").trim();
     let note = "";
     let notice;
-    if (g.ok && state.run?.awaiting && !state.suspended && p) {
-      const r = readReply(p);
-      if (r.answer) ({ note, notice } = answerGate(st, state, r, "chat"));
-      else note = `${tag} The user's message does not clearly answer step ${state.run.awaiting.step}, so the gate still waits: do not take it as an answer. If they seem to mean one, ask them to confirm.\n`;
-    }
+    const r = g.ok && state.run?.awaiting && !state.suspended && pick(p, GATE);
+    if (r) ({ note, notice } = answerGate(st, state, r, "chat"));
     // Without a run there is nothing to track on every prompt; session start already said how to begin.
     if (!note && g.ok && !state.run && !state.suspended && railsLevel(g) !== "strict") return null;
     return { context: note + describe(g, state, root), event: event_, notice };
@@ -205,7 +200,7 @@ export function runHook(event, input, root, opts = {}) {
     const answers = afterAsk(input, state);
     if (!answers) return null;
     st.save(state);
-    const done = answers.map(({ kind, text }) => (kind === "gate" ? g.ok && gateFromDialog(st, state, text) : suspendFromDialog(st, state, text, root))).filter(Boolean);
+    const done = answers.map((a) => fromDialog(g, st, state, a, root)).filter(Boolean);
     if (!done.length) return null;
     return { context: done.map((d) => d.note).join("") + describe(g, state, root), event: input.hook_event_name || "PostToolUse", notice: done.map((d) => d.notice).join(" ") };
   }
