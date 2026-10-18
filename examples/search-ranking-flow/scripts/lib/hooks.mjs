@@ -1,7 +1,7 @@
 // The lifecycle hooks, the same for every agent: what to inject at session start and on prompts,
 // which tool calls to refuse, and when to bounce a stop. How a tool call is read is in tools.mjs,
-// shell.mjs and protect.mjs. runHook returns what to answer; flow.mjs writes it in the agent's
-// format, so the answer has one shape whichever part of the runtime produced it.
+// shell.mjs, protect.mjs and settings.mjs. runHook returns what to answer; flow.mjs writes it in
+// the agent's format, so the answer has one shape whichever part of the runtime produced it.
 
 import os from "node:os";
 import path from "node:path";
@@ -9,26 +9,24 @@ import { skillDir, tag, relPath, railsLevel, flowCmd } from "./env.mjs";
 import { globToRegExp, stepCommands } from "./match.mjs";
 import { guardMatches } from "./shell.mjs";
 import { toolAction } from "./tools.mjs";
-import { shellViolation, dropsHooks, railsPaths, inside, samePath, codeTouchesRails, REPLY_WORD } from "./protect.mjs";
+import { shellViolation, codeTouchesRails, REPLY_WORD } from "./protect.mjs";
+import { dropsHooks, railsPaths, inside, samePath } from "./settings.mjs";
 import { openStore } from "./store.mjs";
 import { loadGraph } from "./graph.mjs";
 import { blockingGate, guardedStep, approve, reject } from "./run.mjs";
-import { describe, nextHint } from "./status.mjs";
+import { describe, nextHint, askToSuspend } from "./status.mjs";
 
-// How the agent asks for what only the user can allow; the user answers in the chat.
-const askToSuspend = (f) => `If the change is needed, run \`${f} request suspend --reason "<what you will change>"\`, then stop and ask the user to reply \`suspend\`.`;
-const railsMsg = (f) => `the workflow's own rules (its playbooks, profile and scripts) and the hooks that enforce them change only while the rails are suspended, which only the user can allow. ${askToSuspend(f)}`;
+const railsMsg = (root) => `the workflow's own rules (its playbooks, profile and scripts) and the hooks that enforce them change only while the rails are suspended, which only the user can allow. If the change is needed, ${askToSuspend(root)}.`;
 
 const STATE_MSG = "the run state and project bindings in .flow/ are changed only through flow.mjs or by the user (reading them with cat, jq, grep or Get-Content is fine; or try `flow status` or `flow log`).";
 const SHELL_MSG = {
-  human: (f) => `only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. At a human gate, stop and ask the user to reply \`approve\` or \`reject <reason>\`. To change the workflow's own files: ${askToSuspend(f).replace(/^If the change is needed, r/, "r")}`,
+  human: (root) => `only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. At a human gate, stop and ask the user to reply \`approve\` or \`reject <reason>\`. To change the workflow's own files, ${askToSuspend(root)}.`,
   rails: railsMsg,
   agent: () => "this would hand a prompt to an agent session that the rails cannot tell from the user's own: one that starts with `approve`, `reject` or `suspend`, or that the rails cannot read (a variable, stdin). Its hooks are this workflow's, so it could answer a human gate or a suspend request in the user's place. Write the prompt as plain text that does not start with those words, or ask the user.",
   complex: "this command nests shells or scripts too deeply for the rails to check. Run it as simpler, separate commands.",
   clean: "git clean -x would delete the run state in .flow/; clean without -x/-X, or ask the user.",
   state: STATE_MSG,
 };
-const DELETING_TOOL = /delete|remove|rm|move|rename|clean|purge|unlink|trash/;
 
 // Checks that protect the rails themselves: the run state, the project bindings, the skill, the
 // hook settings and the human-only commands. They need no graph, so they hold even while the
@@ -36,13 +34,12 @@ const DELETING_TOOL = /delete|remove|rm|move|rename|clean|purge|unlink|trash/;
 function railsCheck(act, g, root, cwd) {
   const rp = railsPaths(root, skillDir);
   const ctx = { root, cwd, skillDir };
-  const f = flowCmd(root);
   const pathCheck = (abs, change) => {
     const rel = relPath(root, abs);
-    if (samePath(rel, g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the rails are suspended, which only the user can allow. Ask the user for the values, or propose them from the repository. ${askToSuspend(f)}`;
+    if (samePath(rel, g.projectFile)) return `the project bindings in ${g.projectFile} are part of the rails; they change only while the rails are suspended, which only the user can allow. Ask the user for the values, or propose them from the repository. If the change is needed, ${askToSuspend(root)}.`;
     if (/^\.flow(\/|$)/i.test(rel)) return "the run state is written only by flow.mjs.";
-    if (inside(abs, rp.skill)) return railsMsg(f);
-    if ((rp.configs.some((q) => samePath(q, abs)) || inside(abs, rp.hookDir)) && (!change || dropsHooks(abs, { change }))) return railsMsg(f);
+    if (inside(abs, rp.skill)) return railsMsg(root);
+    if ((rp.configs.some((q) => samePath(q, abs)) || inside(abs, rp.hookDir)) && (!change || dropsHooks(abs, { change }))) return railsMsg(root);
     return null;
   };
   if (act.kind === "edit") {
@@ -52,25 +49,24 @@ function railsCheck(act, g, root, cwd) {
   }
   for (const line of act.lines || []) {
     const v = shellViolation(line.command, line.ps, ctx);
-    if (v) return typeof SHELL_MSG[v] === "function" ? SHELL_MSG[v](f) : SHELL_MSG[v];
+    if (v) return typeof SHELL_MSG[v] === "function" ? SHELL_MSG[v](root) : SHELL_MSG[v];
   }
   if (act.kind !== "other" || act.readOnly) return null;
-  if (act.prompts.some((t) => REPLY_WORD.test(t))) return SHELL_MSG.agent(f);
+  if (act.prompts.some((t) => REPLY_WORD.test(t))) return SHELL_MSG.agent(root);
   if (act.code.some((c) => codeTouchesRails(c, ctx))) return `${STATE_MSG} The same holds for the workflow's own files and hook settings.`;
-  const deletes = DELETING_TOOL.test(act.name);
-  for (const t of act.values) {
+  for (const { text: t, context } of act.values) {
     const abs = path.resolve(cwd, t.replace(/^~(?=\/|\\|$)/, os.homedir()));
     // An unknown tool may write any path it is given, and one that deletes takes what is below it.
-    const r = pathCheck(abs, null) || (deletes && [rp.state, rp.skill, rp.hookDir, ...rp.configs].some((q) => inside(q, abs)) ? railsMsg(f) : null);
+    const r = pathCheck(abs, null) || (act.deletes && !context && [rp.state, rp.skill, rp.hookDir, ...rp.configs].some((q) => inside(q, abs)) ? railsMsg(root) : null);
     if (r) return r;
   }
   return null;
 }
 
-function preToolUse(g, state, input, root) {
+function preToolUse(g, state, input, root, opts) {
   const rails = railsLevel(g);
   if (state.suspended || (g.ok && rails === "advisory")) return null;
-  const act = toolAction(input);
+  const act = toolAction(input, opts);
   const cwd = input.cwd || root;
   const own = railsCheck(act, g, root, cwd);
   if (own || !g.ok) return own;
@@ -141,7 +137,8 @@ function stopCheck(g, state, input, root) {
 //   { context: text, event }   context for the agent (event: the hook event name to report)
 //   { deny: reason }           refuse the tool call
 //   { block: reason }          bounce the stop
-export function runHook(event, input, root) {
+// opts are passed to toolAction (which shell a Bash tool runs).
+export function runHook(event, input, root, opts = {}) {
   const g = loadGraph(root);
   const st = openStore(root);
   const state = st.load();
@@ -166,7 +163,7 @@ export function runHook(event, input, root) {
     return { context: note + describe(g, state, root), event: event_ };
   }
   if (event === "pre-tool-use") {
-    const reason = preToolUse(g, state, input, root);
+    const reason = preToolUse(g, state, input, root, opts);
     if (!reason) return null;
     st.log({ event: "block-tool", tool: input.tool_name, reason });
     return { deny: reason };

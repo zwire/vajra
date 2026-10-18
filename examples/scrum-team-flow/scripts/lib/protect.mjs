@@ -2,10 +2,10 @@
 // settings) and the commands only the human may run. Part of the security boundary of the rails:
 // every check here fails closed when unsure.
 
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { shellCommands, programName, commandStart } from "./shell.mjs";
+import { HOOK_CONFIGS, DISABLES_HOOKS, railsPaths, inside, samePath } from "./settings.mjs";
 
 // Whether code for an interpreter names the run state or the rails: any mention counts, as it
 // can open any path. ctx = { root, skillDir }.
@@ -15,12 +15,13 @@ export function codeTouchesRails(text, ctx) {
   return /\.flow/.test(t) || namesRuntime(text, ctx) || (rel !== "" && t.includes(rel)) || HOOK_CONFIGS.some((f) => t.includes(f)) || DISABLES_HOOKS.test(text);
 }
 
-// Whether text names the runtime's code: flow.mjs, or a module in the skill's scripts/lib/ (which
-// can write the run state or answer a gate when loaded). The skill may sit outside the project, so
-// its name is matched, not its path. ctx = { skillDir }, optional.
-export function namesRuntime(text, ctx) {
+// Whether text names the runtime's code: flow.mjs (not workflow.mjs; a POSIX shell reads
+// scripts\flow.mjs as scriptsflow.mjs), or a module in the skill's scripts/lib/ (which can write the
+// run state or answer a gate when loaded). The skill may sit outside the project, so its name is
+// matched, not its path. ctx = { skillDir }, optional.
+function namesRuntime(text, ctx) {
   const t = norm(text).replace(/\/(\.\/)+/g, "/").replace(/\/{2,}/g, "/");
-  return /flow\.mjs/.test(t) || (!!ctx?.skillDir && t.includes(`${norm(path.basename(ctx.skillDir))}/scripts/lib/`));
+  return /(?<![\w-])flow\.mjs|scripts\/?flow\.mjs/.test(t) || (!!ctx?.skillDir && t.includes(`${norm(path.basename(ctx.skillDir))}/scripts/lib/`));
 }
 
 // ---------- shell access to the run state and to the human-only commands ----------
@@ -63,7 +64,13 @@ function isStateWord(t, ps, ctx) {
 }
 // A plain path argument, as opposed to an option value, a script or a sentence.
 const purePath = (t) => !/^-/.test(t) && !/\s/.test(t) && STATE_PATH.test(norm(t));
+// A redirection that writes its path (`>`, `>>`, `&>`, `<>`); `<` only reads it.
+const writesTo = (x) => typeof x.redir === "string" && x.redir.includes(">");
+// Changing directory only moves where later paths resolve; shellViolation follows it.
+const CHDIR = /^(cd|pushd|chdir|set-location|sl|push-location)$/;
 
+// Programs that delete, empty or move the paths they are given.
+const DELETERS = /^(rm|rmdir|unlink|shred|mv|move|ren|remove-item|ri|del|erase|rd|move-item|mi|rename-item|rni|clear-content|clc)$/;
 // Programs that only read the files they are given, with the flags that make them write or run code.
 const READERS = new Map(Object.entries({
   cat: null, head: null, tail: null, less: /^(-o|-O|--log-file|--LOG-FILE)/, more: null, ls: null, wc: null, grep: null, egrep: null, fgrep: null,
@@ -98,16 +105,21 @@ const DATA_PROGRAMS = new Set(["echo", "printf", "write-output", "write-host"]);
 // there keeps it untouched. Programs that delete or move do not get this.
 const EXCLUDE_EQ = /^--?[\w-]*(exclude|ignore)[\w-]*=/i;
 const EXCLUDE_FLAG = /^--(exclude|exclude-dir|ignore|ignore-pattern|ignore-path)$/i;
-const withoutExcluded = (args) => args.filter((x, j) => !EXCLUDE_EQ.test(x.text) && !EXCLUDE_FLAG.test(args[j - 1]?.text || ""));
+// git also takes `-e <pattern>` (git clean, git ls-files).
+const excluded = (args, j, git) => EXCLUDE_EQ.test(args[j].text) || EXCLUDE_FLAG.test(args[j - 1]?.text || "") || (git && (/^-e./.test(args[j].text) || args[j - 1]?.text === "-e"));
+const withoutExcluded = (args, git = false) => args.filter((x, j) => !excluded(args, j, git));
 // PowerShell cmdlets that write text to a path: only the path counts (`-Path`, `-LiteralPath`,
 // `-FilePath`, `-Name`, or the first operand), never the text (`Add-Content .gitignore ".flow/x"`).
 // Empty when the path is not given, so it comes from the pipeline.
 const CONTENT_WRITERS = /^(set-content|sc|add-content|ac|out-file|new-item|ni)$/;
 const PATH_PARAM = /^-(path|literalpath|lp|pspath|filepath|name)(:|$)/i;
 const SWITCH = /^-(force|nonewline|passthru|append|whatif|confirm|noclobber|asbytestream|recurse)$/i;
+// A link's target is a path too: `New-Item -ItemType SymbolicLink -Path x -Target .flow`.
+const LINK_PARAM = /^-(target|value)(:|$)/i;
 function contentTargets(args) {
   const out = [];
-  for (const [j, x] of args.entries()) if (PATH_PARAM.test(x.text)) { const v = /:/.test(x.text) ? x : args[j + 1]; if (v) out.push(v); }
+  const link = args.some((x, j) => /^-(itemtype|type)(:.*)?$/i.test(x.text) && /link|junction/i.test(/:/.test(x.text) ? x.text : args[j + 1]?.text || ""));
+  for (const [j, x] of args.entries()) if (PATH_PARAM.test(x.text) || (link && LINK_PARAM.test(x.text))) { const v = /:/.test(x.text) ? x : args[j + 1]; if (v) out.push(v); }
   const first = args.find((x, j) => !/^-/.test(x.text) && !(/^-/.test(args[j - 1]?.text || "") && !SWITCH.test(args[j - 1].text)));
   if (first && !out.includes(first)) out.push(first);
   return out;
@@ -149,14 +161,20 @@ function nestedAgent(w) {
 }
 
 function commandViolation(w, ctx) {
-  const { name, args } = head(w);
+  const { name, args: all } = head(w);
   if (nestedAgent(w)) return "agent";
+  if (CHDIR.test(name)) return null;
+  const args = all.filter((x) => !x.redir);
   const flowAt = w.findIndex((x) => programName(x.text) === "flow.mjs");
   if (flowAt >= 0 && w[flowAt + 1]?.text !== "request" && w.slice(flowAt + 1).some((x) => HUMAN_ONLY.has(x.text.toLowerCase()))) return "human";
   // Code that loads the runtime itself could call approve() or answer a gate.
-  if (INTERPRETERS.test(name) && args.some((x) => namesRuntime(x.text, ctx) && programName(x.text) !== "flow.mjs")) return "human";
-  if (name === "git" && subcommand(args) === "clean" && args.some((x) => /^-[a-z]*[xX]/.test(x.text)) && !args.some((x) => /^(-[a-z]*n|--dry-run)$/.test(x.text))) return "clean";
-  if (w.some((x) => x.redir && isStateWord(x.text, w.ps, ctx))) return "state";
+  if (INTERPRETERS.test(name) && all.some((x) => namesRuntime(x.text, ctx) && programName(x.text) !== "flow.mjs")) return "human";
+  // git clean -x deletes ignored files, .flow/ among them, unless it dry-runs or excludes .flow (-e .flow).
+  if (name === "git" && subcommand(args) === "clean") {
+    if (args.some((x, j) => /(^|[=e])\.?\/?\.flow\/?$/.test(x.text) && excluded(args, j, true))) return null;
+    if (args.some((x) => /^-[a-z]*[xX]/.test(x.text)) && !args.some((x) => /^(-[a-z]*n|--dry-run)$/.test(x.text))) return "clean";
+  }
+  if (w.some((x) => writesTo(x) && isStateWord(x.text, w.ps, ctx))) return "state";
   if (DATA_PROGRAMS.has(name)) return null;
   // Interpreter code can open any path, so any mention of .flow in its arguments counts.
   if (INTERPRETERS.test(name)) return args.some((x) => mentionsState(x.text)) ? "state" : null;
@@ -166,10 +184,10 @@ function commandViolation(w, ctx) {
     if (!dest || isStateWord(dest.text, w.ps, ctx)) return args.some((x) => isStateWord(x.text, w.ps, ctx)) ? "state" : null;
     return args.some((x) => x !== dest && mentionsState(x.text) && STATE_PATH.test(norm(x.text)) && !purePath(x.text.replace(/^-(path|literalpath|lp):/i, ""))) ? "state" : null;
   }
-  const deletes = /^(remove-item|rm|ri|del|erase|rd|rmdir|unlink|shred|clear-content|clc|move-item|mi|mv|move|rename-item|rni|ren)$/.test(name);
+  const deletes = DELETERS.test(name);
   const content = w.ps && CONTENT_WRITERS.test(name) ? contentTargets(args) : [];
   if (content.length) return content.some((x) => isStateWord(x.text, w.ps, ctx)) ? "state" : null;
-  const targets = deletes ? args : withoutExcluded(args);
+  const targets = deletes ? args : withoutExcluded(args, name === "git");
   const reader = READERS.has(name) ? READERS.get(name) : name === "git" && gitReads(args) ? /^--output/ : undefined;
   if (reader === undefined) return targets.some((x) => isStateWord(x.text, w.ps && deletes, ctx)) ? "state" : null;
   if (!targets.some((x) => mentionsState(x.text))) return null;
@@ -184,32 +202,24 @@ function commandViolation(w, ctx) {
   return null;
 }
 
-// The rails' own definition: the skill (playbooks, profile, these scripts) and the agents' hook
-// settings. They change only while the human has suspended the rails, so the agent cannot switch
-// its own rails off (rails: advisory, a deleted guard, a removed hook, disableAllHooks).
-// Files whose settings run or switch off the hooks: Claude Code's (which Copilot reads too), Codex's
-// and Copilot's own settings (they can hold hooks and disableAllHooks). VS Code's settings can turn
-// hooks off too (chat.useHooks) but are read often, so code that merely names them is not refused.
-const HOOK_CONFIGS = [".claude/settings.json", ".claude/settings.local.json", ".codex/hooks.json", ".codex/config.toml", ".github/copilot/settings.json", ".github/copilot/settings.local.json"];
-export function railsPaths(root, skillDir) {
-  const configs = [...HOOK_CONFIGS, ".vscode/settings.json", `.github/hooks/${path.basename(skillDir)}.json`].map((f) => path.join(root, f));
-  configs.push(...[".claude/settings.json", ".codex/config.toml", ".copilot/settings.json"].map((f) => path.join(os.homedir(), f)));
-  // Copilot runs every file in .github/hooks/, so a new one is a new hook.
-  return { skill: skillDir, configs, state: path.join(root, ".flow"), hookDir: path.join(root, ".github", "hooks") };
-}
-// Paths compared as the most permissive file system would: any case, either slash.
-export const samePath = (a, b) => norm(a) === norm(b);
-export const inside = (p, dir) => samePath(p, dir) || norm(p).startsWith(norm(dir).replace(/\/$/, "") + "/");
-// Hook settings may change except where an edit drops a flow.mjs hook or turns hooks off.
-const DISABLES_HOOKS = /disableAllHooks|codex_hooks\s*=\s*false|chat\.useHooks["']?\s*[:=]\s*false/i;
-// Codex: hooks = false under [features] (or features.hooks = false).
-const TOML_OFF = /\bhooks\s*=\s*false\b/;
-const DELETERS = /^(rm|rmdir|unlink|shred|mv|move|remove-item|ri|del|erase|rd|move-item|mi|rename-item|rni)$/;
+
+// Text that names the skill or a hook settings file, or turns the hooks off: code that could rewrite them.
+const namesRails = (t, rel) => (rel !== "" && norm(t).includes(rel)) || HOOK_CONFIGS.some((f) => norm(t).includes(f)) || DISABLES_HOOKS.test(t);
 
 function railsViolation(w, ctx) {
-  const { k, name, args } = head(w);
+  const { k, name, args: all } = head(w);
+  if (CHDIR.test(name)) return null;
   const rp = railsPaths(ctx.root, ctx.skillDir);
+  const rel = norm(path.relative(ctx.root, rp.skill));
   const resolve = (t) => path.resolve(ctx.cwd, t.replace(/^-[a-z]+:/i, "").replace(/^~(?=\/|\\|$)/, os.homedir()));
+  // What a path is: in the run state (named by a path that resolves there, as after a cd), or in the rails.
+  const hit = (t) => {
+    const p = resolve(t);
+    return inside(p, rp.state) ? "state" : inside(p, rp.skill) || rp.configs.some((q) => samePath(q, p)) || inside(p, rp.hookDir) ? "rails" : null;
+  };
+  // A redirection writes its path whatever the program is (`cat x > .claude/settings.json`).
+  for (const x of all) if (writesTo(x) && hit(x.text)) return hit(x.text);
+  const args = all.filter((x) => !x.redir);
   // Deleting or moving a directory that holds the state or the rails.
   if (DELETERS.test(name)) {
     for (const x of args) {
@@ -218,21 +228,18 @@ function railsViolation(w, ctx) {
       if ([rp.state, rp.skill, ...rp.configs].some((q) => inside(q, p))) return inside(rp.state, p) && !inside(rp.skill, p) ? "state" : "rails";
     }
   }
-  if (pureReader(name)) return null;
+  // A reader with no flag that makes it write; a sed or awk script may still name a file to write.
+  const flag = READERS.get(name);
+  if (READERS.has(name) && !(flag && args.some((x) => flag.test(x.text)))) return SCRIPTED.has(name) && args.some((x) => /\s|;/.test(x.text) && namesRails(x.text, rel)) ? "rails" : null;
   if (name === "git" && gitReads(args)) return null;
-  if (INTERPRETERS.test(name)) {
-    // Interpreter code (not the script it runs) that names the rails could rewrite them.
-    const rel = norm(path.relative(ctx.root, rp.skill));
-    return args.some((x) => /\s|[(;]/.test(x.text) && (norm(x.text).includes(rel) || HOOK_CONFIGS.some((f) => norm(x.text).includes(f)) || DISABLES_HOOKS.test(x.text))) ? "rails" : null;
-  }
+  // Interpreter code (not the script it runs) that names the rails could rewrite them.
+  if (INTERPRETERS.test(name)) return args.some((x) => /\s|[(;]/.test(x.text) && namesRails(x.text, rel)) ? "rails" : null;
   const dest = copyDestination(name, args);
   const content = w.ps && CONTENT_WRITERS.test(name) ? contentTargets(args) : [];
-  const redirs = args.filter((x) => x.redir);
-  const named = DATA_PROGRAMS.has(name) ? redirs : dest ? [dest, ...redirs] : content.length ? [...content, ...redirs] : DELETERS.test(name) ? args : withoutExcluded(args);
+  const named = DATA_PROGRAMS.has(name) ? [] : dest ? [dest] : content.length ? content : DELETERS.test(name) ? args : withoutExcluded(args, name === "git");
   for (const x of [...named, ...w.slice(0, k)]) {
-    if (programName(x.text) === "flow.mjs" || /\s/.test(x.text) || (!x.redir && /^-/.test(x.text) && !/^-[a-z]+:/i.test(x.text))) continue;
-    const p = resolve(x.text);
-    if (inside(p, rp.skill) || rp.configs.some((q) => samePath(q, p)) || inside(p, rp.hookDir)) return "rails";
+    if (programName(x.text) === "flow.mjs" || /\s/.test(x.text) || (/^-/.test(x.text) && !/^-[a-z]+:/i.test(x.text))) continue;
+    if (hit(x.text)) return hit(x.text);
   }
   return null;
 }
@@ -240,18 +247,30 @@ function railsViolation(w, ctx) {
 // Commands that change whatever is piped into them (`find .flow | xargs rm`, `gci .flow | Remove-Item`).
 // A content cmdlet given its own path writes the piped text there; tee and Copy-Item only write
 // their own target, which the command's own check covers.
-const PIPE_WRITERS = /^(xargs|parallel|remove-item|ri|rm|del|erase|rd|rmdir|move-item|mi|mv|move|rename-item|rni|set-content|sc|add-content|ac|clear-content|clc|out-file|new-item|ni)$/;
+const pipeWrites = (name) => /^(xargs|parallel)$/.test(name) || DELETERS.test(name) || CONTENT_WRITERS.test(name);
 
 // What a shell line would do that the agent may not: "human" (a human-only command), "rails",
 // "clean" (git clean -x), "state" (change .flow/), "complex" (past what the reader follows), or
 // null. ctx = { root, cwd, skillDir } adds the rails check; without it only the state is checked.
 export function shellViolation(command, ps, ctx) {
-  const { cmds, failed, complex } = shellCommands(command, { ps });
+  const { cmds, failed, complex, code } = shellCommands(command, { ps });
   if (complex) return "complex";
-  const found = new Set(cmds.flatMap((w) => [commandViolation(w, ctx), ctx && railsViolation(w, ctx)]).filter(Boolean));
+  // After `cd x` (or Set-Location, pushd) paths resolve from x, so each command is checked from
+  // every folder the line moves to, as well as from where it starts.
+  const ctxs = [ctx];
+  for (const w of ctx ? cmds : []) {
+    const { name, args } = head(w);
+    if (!CHDIR.test(name)) continue;
+    const to = args.filter((x) => !/^[-+]/.test(x.text)).pop()?.text ?? "~";
+    ctxs.push({ ...ctx, cwd: path.resolve(ctxs[ctxs.length - 1].cwd, to.replace(/^~(?=\/|\\|$)/, os.homedir())) });
+  }
+  const found = new Set(cmds.flatMap((w) => ctxs.flatMap((c) => [commandViolation(w, c), c && railsViolation(w, c)])).filter(Boolean));
+  // PowerShell that calls .NET (`[IO.File]::WriteAllText(...)`, `(Get-Item x).Delete()`) can open
+  // any path, like interpreter code, so any mention of the state or the rails counts.
+  for (const t of code) if (/\.flow/i.test(t) || (ctx && codeTouchesRails(t, ctx))) found.add(/\.flow/i.test(t) ? "state" : "rails");
   const pipeWriter = (w) => {
     const { k, name, args } = head(w);
-    if (!PIPE_WRITERS.test(name)) return false;
+    if (!pipeWrites(name)) return false;
     if (CONTENT_WRITERS.test(name) && contentTargets(args).length) return false;
     if (!/^(xargs|parallel)$/.test(name)) return true;
     // xargs runs a program on what it reads: only readers (and echo) leave .flow/ alone.
@@ -264,31 +283,9 @@ export function shellViolation(command, ps, ctx) {
   if (statePiped) found.add("state");
   if (failed) {
     // Unreadable as shell: fall back to the raw text, conservatively.
-    if (/flow\.mjs["']?\s+(?!\s|request\s)(.*\s)?(approve|reject|suspend|hook|mcp)\b/i.test(command)) found.add("human");
+    if (/(?:(?<![\w-])|scripts)flow\.mjs["']?\s+(?!\s|request\s)(.*\s)?(approve|reject|suspend|hook|mcp)\b/i.test(command)) found.add("human");
     if (/(^|[\s'"=:(/\\,])\.flow([\\/\s'")]|$)/i.test(command)) found.add("state");
   }
   if (failed && ctx && (/disableAllHooks/i.test(command) || norm(command).includes(norm(path.relative(ctx.root, ctx.skillDir))))) found.add("rails");
   return ["human", "agent", "rails", "clean", "state"].find((v) => found.has(v)) || null;
 }
-
-// Whether an edit of a hook settings file changes what the hooks run: removes a flow.mjs hook,
-// turns hooks off, points the agent at other hook files, or adds a command. A command the agent
-// adds would run at the next lifecycle event, outside the tool hook, where it could write the run
-// state or answer a gate. Other settings (permissions, models, editor options) may change.
-export function dropsHooks(abs, act) {
-  const { removed, added, whole } = act.change;
-  const off = (t) => DISABLES_HOOKS.test(t) || HOOK_FILES_SETTING.test(t) || (/\.toml$/i.test(abs) && TOML_OFF.test(t));
-  if (off(added) || off(whole ?? "")) return true;
-  // A hook command taken out must come back in the same edit: re-indenting or editing next to it is fine.
-  const hookCommands = (t) => [...t.matchAll(/[^"'\n]*flow\.mjs[^"'\n]*/g)].map((m) => m[0].trim());
-  if (hookCommands(removed).some((c) => !added.includes(c))) return true;
-  if (commands(added).some((c) => !commands(removed).includes(c))) return true;
-  if (whole === undefined) return false;
-  let before = "";
-  try { before = fs.readFileSync(abs, "utf8"); } catch {}
-  return hookCommands(before).some((c) => !whole.includes(c)) || commands(whole).some((c) => !commands(before).includes(c));
-}
-// The commands a settings file runs: values of `command` keys (JSON and TOML), and argument lists.
-const commands = (t) => [...String(t).matchAll(/["']?\b(?:command|bash|powershell|args)["']?\s*[:=]\s*("(?:[^"\\]|\\.)*"|'[^']*'|\[[^\]]*\])/g)].map((m) => m[1]);
-// VS Code loads hook files from the folders this setting lists.
-const HOOK_FILES_SETTING = /hookFilesLocations/i;

@@ -20,7 +20,8 @@ export function validatePlaybook(text, id, where = `playbooks/${id}.md`, skillDi
   if (data.id !== id) err(`frontmatter id "${data.id}" must equal file name "${id}"`);
 
   const secs = sections(body);
-  const stepLines = (secs.get("Steps") || []).filter((l) => /^\s*(\d+\.|-)\s/.test(l));
+  // Only numbered steps are steps: the runtime records and gates them, so a tag on a bullet would
+  // satisfy the validator while nothing stops at it.
   const steps = (secs.get("Steps") || []).filter((l) => /^\d+\.\s/.test(l)).map((l, i) => ({
     n: i + 1,
     text: l.replace(/^\d+\.\s+/, "").trim(),
@@ -36,8 +37,8 @@ export function validatePlaybook(text, id, where = `playbooks/${id}.md`, skillDi
     promotes: null,
     terminal: data.terminal === true,
     exits: Array.isArray(data.exits) ? data.exits : [],
-    humanGates: stepLines.filter((l) => /\[human-gate\]/i.test(l)).length,
-    irreversibleSteps: stepLines.filter((l) => /\[irreversible\]/i.test(l)).length,
+    humanGates: steps.filter((s) => s.humanGate).length,
+    irreversibleSteps: steps.filter((s) => s.irreversible).length,
     steps,
     doneWhen: (secs.get("Done when") || []).join("\n").trim(),
     checks: [],
@@ -117,15 +118,17 @@ export function validatePlaybook(text, id, where = `playbooks/${id}.md`, skillDi
     if (!secs.has(s)) err(`missing "## ${s}" section`);
     else if (secs.get(s).every((l) => l.trim() === "")) err(`"## ${s}" section is empty`);
   }
-  if (secs.has("Steps") && stepLines.length === 0) err('"## Steps" has no numbered steps');
+  if (secs.has("Steps") && steps.length === 0) err('"## Steps" has no numbered steps');
+  const tagged = (secs.get("Steps") || []).filter((l) => /^\s*([-*+]|\s+\d+\.)\s/.test(l) && /\[(human-gate|irreversible)\]/i.test(l));
+  for (const l of tagged) err(`[human-gate] and [irreversible] tag numbered steps only; this list item is not one: "${l.trim().slice(0, 80)}"`);
 
   // irreversible steps need a human gate earlier in the same playbook (or on the same step)
   let gated = false;
-  for (const l of stepLines) {
-    if (/\[human-gate\]/i.test(l)) gated = true;
-    if (/\[irreversible\]/i.test(l) && !gated) err(`irreversible step without a preceding [human-gate]: "${l.trim().slice(0, 80)}"`);
+  for (const s of steps) {
+    gated ||= s.humanGate;
+    if (s.irreversible && !gated) err(`irreversible step without a preceding [human-gate]: "${s.text.slice(0, 80)}"`);
   }
-  if (stepLines.length > 12) warn(`${stepLines.length} steps; consider splitting the playbook`);
+  if (steps.length > 12) warn(`${steps.length} steps; consider splitting the playbook`);
   if (skillDir) {
     const hits = repoSpecific(body, skillDir, path.join(skillDir, "playbooks"));
     if (hits.length) warn(`${hits.map((h) => `\`${h}\``).join(", ")} ${hits.length > 1 ? "look" : "looks"} repository-specific; use a binding (\`\${name}\` declared in bindings.md) so the skill works in any repository`);

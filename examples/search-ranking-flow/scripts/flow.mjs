@@ -192,7 +192,7 @@ function answer(v, format) {
 // A hook that crashed (on a payload it does not understand, or with a broken runtime) must not stop
 // all work, nor let the rails be changed. It blocks only calls whose text names the workflow's own
 // files or the hook settings, which a plain search finds without understanding the call.
-const NAMES_RAILS = /\.flow\b|flow\.mjs|\.claude[\\/]|\.codex[\\/]|\.github[\\/](hooks|copilot)|\.vscode[\\/]settings|disableAllHooks|useHooks/i;
+const NAMES_RAILS = /\.flow\b|(?:(?<![\w-])|scripts)flow\.mjs|\.claude[\\/]|\.codex[\\/]|\.github[\\/](hooks|copilot)|\.vscode[\\/]settings|disableAllHooks|useHooks/i;
 const METADATA = /^(session|transcript|cwd|permission|hook_?event|timestamp|model|turn)/i;
 const NAMES_REPLY = /(^|[^\w-])(approve|reject|suspend)(?![\w-])/i;
 const NAMES_PROMPT = /\b(claude|codex|copilot)\b|"(prompt|message|text)"\s*:/i;
@@ -281,7 +281,8 @@ export function main(argv) {
     }
     try {
       if (loadError) throw new Error(`the runtime did not load: ${loadError}`);
-      const v = lib.runHook(rest[0], input, root);
+      // Only Claude Code itself runs Bash in a POSIX shell on Windows; see lib/tools.mjs.
+      const v = lib.runHook(rest[0], input, root, { bashIsPosix: agent === "claude" && format !== "copilot" });
       if (!note) return answer(v, format);
       return answer({ context: [note, v?.context].filter(Boolean).join("\n"), event: v?.event || input.hook_event_name || "UserPromptSubmit" }, format);
     } catch (e) {
