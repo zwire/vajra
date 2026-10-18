@@ -395,6 +395,19 @@ test("a missing runtime is a warning", () => {
   assert.ok(hasWarning(r, /runtime missing/));
 });
 
+test("a runtime copy that differs from this vajra's, or keeps files it no longer ships, is out of date", () => {
+  const dir = makeSkill("ok-flow", { routes: ["a"], playbooks: [{ id: "a" }] });
+  fs.appendFileSync(path.join(dir, "SKILL.md"), "\nDrive the run with `scripts/flow.mjs`.\n");
+  fs.cpSync(path.dirname(validator), path.join(dir, "scripts"), { recursive: true });
+  // A Windows checkout with CRLF line endings is the same runtime.
+  const flow = path.join(dir, "scripts", "flow.mjs");
+  fs.writeFileSync(flow, fs.readFileSync(flow, "utf8").replace(/\n/g, "\r\n"));
+  assert.ok(!hasWarning(validateSkill(dir), /scripts\/: runtime/));
+  fs.appendFileSync(path.join(dir, "scripts", "lib", "run.mjs"), "\n// older\n");
+  fs.writeFileSync(path.join(dir, "scripts", "lib", "gone.mjs"), "");
+  assert.ok(hasWarning(validateSkill(dir), /differs in lib\/run\.mjs and has files vajra no longer ships \(lib\/gone\.mjs\).*update-to-a-new-vajra/));
+});
+
 // ---------- bindings: a skill names repository-specific values only through bindings ----------
 
 const withBindings = (dir, text) => { fs.writeFileSync(path.join(dir, "bindings.md"), text); return dir; };
