@@ -13,11 +13,16 @@ const EDIT_TOOLS = new Set([
   "edit", "write", "create", "multiedit", "notebookedit",
   "create_file", "replace_string_in_file", "multi_replace_string_in_file", "insert_edit_into_file", "edit_notebook_file",
 ]);
-// Any other tool is read by its input: a tool whose name (its last part, for MCP tools named
-// server__tool) says it only reads is let through; for the rest, values under these keys are read
-// as shell lines or as code, and every value is checked as a path against the rails.
+// Any other tool is read by its input: a tool whose name says it only reads is let through; for
+// the rest, values under these keys are read as shell lines or as code, and every value is checked
+// as a path against the rails. The name is read by its words (its last part, for MCP tools named
+// server__tool), so `view_settings` reads and `format` or `terminal_info` do not delete.
 const READ_ONLY_TOOL = /^(read|get|list|search|grep|glob|find|view|ls|stat|fetch|query|describe|show|lookup|inspect|web)/;
-const ACTING_WORD = /write|creat|updat|set|put|post|delet|remov|move|renam|edit|exec|run|apply|patch|save|insert|append|replac|upload|kill|push|commit|mkdir|copy|install/;
+const ACTING_WORD = /^(write|creat|updat|set$|put$|post$|delet|remov|move|renam|edit|exec|run$|apply|patch|save|insert|append|replac|upload|kill|push|commit|mkdir|copy|install)/;
+const DELETING_WORD = /^(delet|remov|rm$|rmdir|move|renam|clean|purge|unlink|trash|eras|wipe)/;
+const nameWords = (name) => String(name).split(/__|[.:/]/).pop().replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+// Keys that say where a tool runs, not what it changes: a deleting tool's `cwd` is not deleted.
+const CONTEXT_KEY = /^(cwd|root|dir|working_?dir(ectory)?|workspace(_?root)?|base_?dir|project_?(dir|root))$/i;
 const COMMAND_KEY = /^(command|cmd|commandline|command_line|args|argv)$/i;
 const CODE_KEY = /^(code|script|source|program)$/i;
 const MAX_INPUT_DEPTH = 32;
@@ -78,7 +83,8 @@ const shellLine = (name, command, bashIsPosix) => ({ command, ps: /^(powershell|
 // What a tool call does, as the hooks check it:
 //   { kind: "shell", lines: [{ command, ps }] }
 //   { kind: "edit", paths, change }       paths empty when the edit names no file the hook can find
-//   { kind: "other", readOnly, lines, code, prompts, values }   any other tool, read by its input
+//   { kind: "other", readOnly, deletes, lines, code, prompts, values: [{ text, context }] }
+//                                         any other tool, read by its input
 // opts.bashIsPosix: false when the agent may report a PowerShell tool as Bash.
 export function toolAction(input, { bashIsPosix = true } = {}) {
   const name = String(input.tool_name || input.toolName || "").toLowerCase();
@@ -100,12 +106,12 @@ export function toolAction(input, { bashIsPosix = true } = {}) {
   const values = inputStrings(ti);
   return {
     kind: "other",
-    name,
-    readOnly: ((t) => READ_ONLY_TOOL.test(t) && !ACTING_WORD.test(t))(name.split(/__|[.:/]/).pop()),
+    readOnly: ((w) => READ_ONLY_TOOL.test(w[0] || "") && !w.some((x) => ACTING_WORD.test(x)))(nameWords(input.tool_name || input.toolName || "")),
+    deletes: nameWords(input.tool_name || input.toolName || "").some((x) => DELETING_WORD.test(x)),
     lines: values.filter((x) => COMMAND_KEY.test(x.key)).map((x) => shellLine(name, x.text, bashIsPosix)),
     code: values.filter((x) => CODE_KEY.test(x.key)).map((x) => x.text),
     prompts: SUBAGENT.test(name) ? [] : values.filter((x) => PROMPT_KEY.test(x.key) || (MESSAGE_KEY.test(x.key) && SENDS.test(name))).map((x) => x.text),
     // Every value is checked as a path; prose resolves to no real path, so it does no harm.
-    values: values.map((x) => x.text).filter((t) => t && t.length < 4096).map((t) => t.replace(/^file:\/\//i, "")),
+    values: values.filter((x) => x.text && x.text.length < 4096).map((x) => ({ text: x.text.replace(/^file:\/\//i, ""), context: CONTEXT_KEY.test(x.key) })),
   };
 }

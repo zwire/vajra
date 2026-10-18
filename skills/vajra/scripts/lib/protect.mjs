@@ -19,7 +19,7 @@ export function codeTouchesRails(text, ctx) {
 // scripts\flow.mjs as scriptsflow.mjs), or a module in the skill's scripts/lib/ (which can write the
 // run state or answer a gate when loaded). The skill may sit outside the project, so its name is
 // matched, not its path. ctx = { skillDir }, optional.
-export function namesRuntime(text, ctx) {
+function namesRuntime(text, ctx) {
   const t = norm(text).replace(/\/(\.\/)+/g, "/").replace(/\/{2,}/g, "/");
   return /(?<![\w-])flow\.mjs|scripts\/?flow\.mjs/.test(t) || (!!ctx?.skillDir && t.includes(`${norm(path.basename(ctx.skillDir))}/scripts/lib/`));
 }
@@ -69,6 +69,8 @@ const writesTo = (x) => typeof x.redir === "string" && x.redir.includes(">");
 // Changing directory only moves where later paths resolve; shellViolation follows it.
 const CHDIR = /^(cd|pushd|chdir|set-location|sl|push-location)$/;
 
+// Programs that delete, empty or move the paths they are given.
+const DELETERS = /^(rm|rmdir|unlink|shred|mv|move|ren|remove-item|ri|del|erase|rd|move-item|mi|rename-item|rni|clear-content|clc)$/;
 // Programs that only read the files they are given, with the flags that make them write or run code.
 const READERS = new Map(Object.entries({
   cat: null, head: null, tail: null, less: /^(-o|-O|--log-file|--LOG-FILE)/, more: null, ls: null, wc: null, grep: null, egrep: null, fgrep: null,
@@ -103,7 +105,9 @@ const DATA_PROGRAMS = new Set(["echo", "printf", "write-output", "write-host"]);
 // there keeps it untouched. Programs that delete or move do not get this.
 const EXCLUDE_EQ = /^--?[\w-]*(exclude|ignore)[\w-]*=/i;
 const EXCLUDE_FLAG = /^--(exclude|exclude-dir|ignore|ignore-pattern|ignore-path)$/i;
-const withoutExcluded = (args) => args.filter((x, j) => !EXCLUDE_EQ.test(x.text) && !EXCLUDE_FLAG.test(args[j - 1]?.text || ""));
+// git also takes `-e <pattern>` (git clean, git ls-files).
+const excluded = (args, j, git) => EXCLUDE_EQ.test(args[j].text) || EXCLUDE_FLAG.test(args[j - 1]?.text || "") || (git && (/^-e./.test(args[j].text) || args[j - 1]?.text === "-e"));
+const withoutExcluded = (args, git = false) => args.filter((x, j) => !excluded(args, j, git));
 // PowerShell cmdlets that write text to a path: only the path counts (`-Path`, `-LiteralPath`,
 // `-FilePath`, `-Name`, or the first operand), never the text (`Add-Content .gitignore ".flow/x"`).
 // Empty when the path is not given, so it comes from the pipeline.
@@ -165,7 +169,11 @@ function commandViolation(w, ctx) {
   if (flowAt >= 0 && w[flowAt + 1]?.text !== "request" && w.slice(flowAt + 1).some((x) => HUMAN_ONLY.has(x.text.toLowerCase()))) return "human";
   // Code that loads the runtime itself could call approve() or answer a gate.
   if (INTERPRETERS.test(name) && all.some((x) => namesRuntime(x.text, ctx) && programName(x.text) !== "flow.mjs")) return "human";
-  if (name === "git" && subcommand(args) === "clean" && args.some((x) => /^-[a-z]*[xX]/.test(x.text)) && !args.some((x) => /^(-[a-z]*n|--dry-run)$/.test(x.text))) return "clean";
+  // git clean -x deletes ignored files, .flow/ among them, unless it dry-runs or excludes .flow (-e .flow).
+  if (name === "git" && subcommand(args) === "clean") {
+    if (args.some((x, j) => /(^|[=e])\.?\/?\.flow\/?$/.test(x.text) && excluded(args, j, true))) return null;
+    if (args.some((x) => /^-[a-z]*[xX]/.test(x.text)) && !args.some((x) => /^(-[a-z]*n|--dry-run)$/.test(x.text))) return "clean";
+  }
   if (w.some((x) => writesTo(x) && isStateWord(x.text, w.ps, ctx))) return "state";
   if (DATA_PROGRAMS.has(name)) return null;
   // Interpreter code can open any path, so any mention of .flow in its arguments counts.
@@ -176,10 +184,10 @@ function commandViolation(w, ctx) {
     if (!dest || isStateWord(dest.text, w.ps, ctx)) return args.some((x) => isStateWord(x.text, w.ps, ctx)) ? "state" : null;
     return args.some((x) => x !== dest && mentionsState(x.text) && STATE_PATH.test(norm(x.text)) && !purePath(x.text.replace(/^-(path|literalpath|lp):/i, ""))) ? "state" : null;
   }
-  const deletes = /^(remove-item|rm|ri|del|erase|rd|rmdir|unlink|shred|clear-content|clc|move-item|mi|mv|move|rename-item|rni|ren)$/.test(name);
+  const deletes = DELETERS.test(name);
   const content = w.ps && CONTENT_WRITERS.test(name) ? contentTargets(args) : [];
   if (content.length) return content.some((x) => isStateWord(x.text, w.ps, ctx)) ? "state" : null;
-  const targets = deletes ? args : withoutExcluded(args);
+  const targets = deletes ? args : withoutExcluded(args, name === "git");
   const reader = READERS.has(name) ? READERS.get(name) : name === "git" && gitReads(args) ? /^--output/ : undefined;
   if (reader === undefined) return targets.some((x) => isStateWord(x.text, w.ps && deletes, ctx)) ? "state" : null;
   if (!targets.some((x) => mentionsState(x.text))) return null;
@@ -194,7 +202,6 @@ function commandViolation(w, ctx) {
   return null;
 }
 
-const DELETERS = /^(rm|rmdir|unlink|shred|mv|move|remove-item|ri|del|erase|rd|move-item|mi|rename-item|rni)$/;
 
 // Text that names the skill or a hook settings file, or turns the hooks off: code that could rewrite them.
 const namesRails = (t, rel) => (rel !== "" && norm(t).includes(rel)) || HOOK_CONFIGS.some((f) => norm(t).includes(f)) || DISABLES_HOOKS.test(t);
@@ -229,7 +236,7 @@ function railsViolation(w, ctx) {
   if (INTERPRETERS.test(name)) return args.some((x) => /\s|[(;]/.test(x.text) && namesRails(x.text, rel)) ? "rails" : null;
   const dest = copyDestination(name, args);
   const content = w.ps && CONTENT_WRITERS.test(name) ? contentTargets(args) : [];
-  const named = DATA_PROGRAMS.has(name) ? [] : dest ? [dest] : content.length ? content : DELETERS.test(name) ? args : withoutExcluded(args);
+  const named = DATA_PROGRAMS.has(name) ? [] : dest ? [dest] : content.length ? content : DELETERS.test(name) ? args : withoutExcluded(args, name === "git");
   for (const x of [...named, ...w.slice(0, k)]) {
     if (programName(x.text) === "flow.mjs" || /\s/.test(x.text) || (/^-/.test(x.text) && !/^-[a-z]+:/i.test(x.text))) continue;
     if (hit(x.text)) return hit(x.text);
@@ -240,7 +247,7 @@ function railsViolation(w, ctx) {
 // Commands that change whatever is piped into them (`find .flow | xargs rm`, `gci .flow | Remove-Item`).
 // A content cmdlet given its own path writes the piped text there; tee and Copy-Item only write
 // their own target, which the command's own check covers.
-const PIPE_WRITERS = /^(xargs|parallel|remove-item|ri|rm|del|erase|rd|rmdir|move-item|mi|mv|move|rename-item|rni|set-content|sc|add-content|ac|clear-content|clc|out-file|new-item|ni)$/;
+const pipeWrites = (name) => /^(xargs|parallel)$/.test(name) || DELETERS.test(name) || CONTENT_WRITERS.test(name);
 
 // What a shell line would do that the agent may not: "human" (a human-only command), "rails",
 // "clean" (git clean -x), "state" (change .flow/), "complex" (past what the reader follows), or
@@ -263,7 +270,7 @@ export function shellViolation(command, ps, ctx) {
   for (const t of code) if (/\.flow/i.test(t) || (ctx && codeTouchesRails(t, ctx))) found.add(/\.flow/i.test(t) ? "state" : "rails");
   const pipeWriter = (w) => {
     const { k, name, args } = head(w);
-    if (!PIPE_WRITERS.test(name)) return false;
+    if (!pipeWrites(name)) return false;
     if (CONTENT_WRITERS.test(name) && contentTargets(args).length) return false;
     if (!/^(xargs|parallel)$/.test(name)) return true;
     // xargs runs a program on what it reads: only readers (and echo) leave .flow/ alone.

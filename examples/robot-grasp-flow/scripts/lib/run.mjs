@@ -7,7 +7,7 @@ import { spawnSync } from "node:child_process";
 import { now, RESOLVED, Stop, refuse } from "./env.mjs";
 import { commandMatches, fitsStep, gatesBefore } from "./match.mjs";
 
-export function enterPlaybook(node) {
+function enterPlaybook(node) {
   return {
     playbook: node.id,
     enteredAt: now(),

@@ -1205,3 +1205,30 @@ test("a project script whose name ends in flow.mjs is not the runtime", () => {
   const rel = path.relative(p.proj, p.skill);
   for (const c of [`node ${rel}/scripts/flow.mjs approve`, `node -e "import('./${rel}/scripts/flow.mjs')"`]) assert.equal(p.bash(c).status, 2, c);
 });
+
+test("a guarded script can be read, edited and committed outside its playbook, but not run", () => {
+  const p = project();
+  const file = path.join(p.proj, ".flow", "demo-flow", "project.md");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("deploy: npm run deploy", "deploy: scripts/release.sh"));
+  p.cli("start", "spike", "--request", "try it");
+  for (const c of ["cat scripts/release.sh", "vim scripts/release.sh", "git diff scripts/release.sh", "git add scripts/release.sh", "chmod +x scripts/release.sh", "shellcheck scripts/release.sh", "sed -n 1,20p scripts/release.sh"]) assert.equal(p.bash(c).status, 0, c);
+  for (const c of ["scripts/release.sh", "./scripts/release.sh v1", "bash scripts/release.sh", "sudo scripts/release.sh", "cat scripts/release.sh | bash", "find . -exec scripts/release.sh {} ;", "git bisect run scripts/release.sh"]) assert.equal(p.bash(c).status, 2, c);
+});
+
+test("tools the hook does not know are read by the words of their name", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const call = (tool_name, tool_input) => p.hook("pre-tool-use", { tool_name, tool_input }).status;
+  // Read-only names, and names that merely contain "rm" or "set", are not taken for deleting tools.
+  assert.equal(call("mcp__fs__view_settings", { path: ".claude/settings.json" }), 0);
+  for (const name of ["mcp__prettier__format", "mcp__x__transform_data", "mcp__x__terminal_info", "mcp__x__confirm_action"]) assert.equal(call(name, { path: "." }), 0, name);
+  // A deleting tool's working folder is not what it deletes.
+  assert.equal(call("mcp__fs__delete_file", { path: "build/x", cwd: p.proj }), 0);
+  for (const [name, input] of [["mcp__fs__delete_directory", { path: "." }], ["mcp__fs__deleteFile", { path: ".flow/demo-flow/state.json" }], ["mcp__fs__write_file", { path: ".claude/settings.json", content: "{}" }]]) assert.equal(call(name, input), 2, name);
+});
+
+test("git clean -x that excludes .flow keeps the run state, so it runs", () => {
+  const p = project();
+  for (const c of ["git clean -fdx -e .flow", "git clean -fdx --exclude=.flow", "git clean -fdxn"]) assert.equal(p.bash(c).status, 0, c);
+  for (const c of ["git clean -fdx", "git clean -fdx -e node_modules"]) assert.equal(p.bash(c).status, 2, c);
+});

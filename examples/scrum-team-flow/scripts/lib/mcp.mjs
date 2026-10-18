@@ -33,27 +33,31 @@ export function serveMcp(root, suspension, input = process.stdin, output = proce
   const pending = new Map();
   const send = (msg) => output.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
   const ask = (method, params) => new Promise((resolve) => { const id = `flow-${nextId++}`; pending.set(id, resolve); send({ id, method, params }); });
+  // The user's answer in the client's dialog: { decision, note }, where declining picks the second
+  // choice, or null when they dismissed it.
+  const decide = async (message, choices) => {
+    const res = await ask("elicitation/create", {
+      mode: "form",
+      message,
+      requestedSchema: {
+        type: "object",
+        properties: { decision: { type: "string", title: "Decision", enum: choices }, note: { type: "string", title: "Note (optional)" } },
+        required: ["decision"],
+      },
+    });
+    if (res?.action !== "accept" && res?.action !== "decline") return null;
+    return { decision: res.action === "accept" ? res.content?.decision : choices[1], note: res.content?.note || (res.action === "decline" ? "declined" : undefined) };
+  };
 
   async function requestSuspend(reason) {
     let r = suspension.request(root, reason);
     if (r.code === 3 && clientElicits) {
-      const res = await ask("elicitation/create", {
-        mode: "form",
-        message: `${skillName}: suspend the rails so the agent can ${String(reason).trim()}? Nothing is enforced until it turns them back on.`,
-        requestedSchema: {
-          type: "object",
-          properties: {
-            decision: { type: "string", title: "Decision", enum: ["suspend", "keep the rails on"] },
-            note: { type: "string", title: "Note (optional)" },
-          },
-          required: ["decision"],
-        },
-      });
+      const res = await decide(`${skillName}: suspend the rails so the agent can ${String(reason).trim()}? Nothing is enforced until it turns them back on.`, ["suspend", "keep the rails on"]);
       // Answered only while that request still waits; the chat may have answered it meanwhile.
       const state = openStore(root).load();
       if (!state.request) r = { code: 0, text: `The user already answered in the chat: the rails are ${state.suspended ? "suspended" : "on"}.` };
-      else if (res?.action === "accept" && res.content?.decision === "suspend") r = { code: 0, text: suspension.grant(root, "the user (elicitation)", res.content?.note) };
-      else if (res?.action === "accept" || res?.action === "decline") r = { code: 0, text: suspension.refuse(root, "the user (elicitation)", res.content?.note || "declined") };
+      else if (res?.decision === "suspend") r = { code: 0, text: suspension.grant(root, "the user (elicitation)", res.note) };
+      else if (res) r = { code: 0, text: suspension.refuse(root, "the user (elicitation)", res.note || "declined") };
       else r = { code: 3, text: `${r.text}\n(The user dismissed the request; it is still waiting.)` };
     }
     return { content: [{ type: "text", text: r.text }], isError: r.code === 1 || r.code === 2 };
@@ -67,23 +71,12 @@ export function serveMcp(root, suspension, input = process.stdin, output = proce
     for (const k of Object.keys(o)) if (o[k] === undefined) delete o[k];
     let r = execute(cmd, pos, o, root);
     if (r.code === 3 && clientElicits) {
-      const res = await ask("elicitation/create", {
-        mode: "form",
-        message: `${skillName}: ${r.text.split("\n")[0].replace(/^STOP\. /, "")}`,
-        requestedSchema: {
-          type: "object",
-          properties: {
-            decision: { type: "string", title: "Decision", enum: ["approve", "reject"] },
-            note: { type: "string", title: "Note (optional)" },
-          },
-          required: ["decision"],
-        },
-      });
+      const res = await decide(`${skillName}: ${r.text.split("\n")[0].replace(/^STOP\. /, "")}`, ["approve", "reject"]);
       const st = openStore(root);
       const state = st.load();
-      const decided = res?.action === "accept" ? res.content?.decision : res?.action === "decline" ? "reject" : null;
+      const decided = res?.decision && (res.decision === "approve" ? "approve" : "reject");
       if (decided && state.run?.awaiting) {
-        const n = decided === "approve" ? approve(state, "the user (elicitation)", res.content?.note) : reject(state, "the user (elicitation)", res.content?.note || "declined");
+        const n = decided === "approve" ? approve(state, "the user (elicitation)", res.note) : reject(state, "the user (elicitation)", res.note || "declined");
         st.save(state);
         st.log({ event: decided, run: state.run.id, playbook: state.run.playbook, step: n, by: "elicitation" });
         r = { code: 0, text: `The user ${decided === "approve" ? "approved" : "rejected"} step ${n}.\n${execute("status", [], {}, root).text}` };

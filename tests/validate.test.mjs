@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateSkill, toMermaid, parseFrontmatter, SCHEMA } from "../skills/vajra/scripts/validate.mjs";
+import { validateSkill, validatePlaybook, toMermaid, parseFrontmatter, SCHEMA } from "../skills/vajra/scripts/validate.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const validator = path.join(root, "skills", "vajra", "scripts", "validate.mjs");
@@ -458,4 +458,37 @@ test("--project checks that the project binds every name", () => {
   assert.deepEqual(r.project.values, { test: ["pnpm test"], lint: ["pnpm lint", "pnpm typecheck"] });
   const run = spawnSync(process.execPath, [validator, "--project", proj, dir], { encoding: "utf8" });
   assert.equal(run.status, 0, run.stdout);
+});
+
+test("a gate or irreversible tag on a bullet is refused, since the runtime only stops at numbered steps", () => {
+  const text = `---
+id: ship
+title: Ship
+phase: any
+lifecycle: any
+kind: work
+irreversible: [\${deploy}]
+exits:
+  - to: end
+    when: deployed
+---
+
+## Purpose
+
+Deploy.
+
+## Steps
+
+1. Build with \`make\`.
+   - [human-gate] Confirm the deploy.
+2. [irreversible] Run \`\${deploy}\`.
+
+## Done when
+
+- \`\${deploy}\` printed the URL.
+`;
+  const r = validatePlaybook(text, "ship");
+  assert.ok(r.errors.some((e) => /numbered steps only/.test(e)), r.errors.join("\n"));
+  assert.ok(r.errors.some((e) => /irreversible step without a preceding \[human-gate\]/.test(e)), r.errors.join("\n"));
+  assert.equal(r.node.humanGates, 0);
 });

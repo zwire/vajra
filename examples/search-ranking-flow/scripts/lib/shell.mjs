@@ -23,7 +23,7 @@ const KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", 
 const MAX_DEPTH = 8;
 const MAX_READS = 500;
 const MAX_CHARS = 4_000_000;
-export class TooComplex extends Error {}
+class TooComplex extends Error {}
 
 // The program a word names, as the shell would look it up: no directory, no .exe, any case.
 export const programName = (t) => t.replace(/\\/g, "/").split("/").pop().toLowerCase().replace(/\.exe$/, "");
@@ -227,23 +227,38 @@ export function shellCommands(command, { ps = false } = {}) {
   return { cmds, failed, complex, code };
 }
 
+// Programs that read, edit, list or move the files they are given and never run them, so a guarded
+// script named as their argument (`cat scripts/release.sh`, `git diff scripts/release.sh`) is not run.
+const FILE_TOOLS = new Set(["cat", "head", "tail", "less", "more", "ls", "wc", "grep", "egrep", "fgrep", "rg", "jq", "stat", "file", "diff", "cmp",
+  "tree", "du", "sort", "uniq", "cut", "od", "xxd", "hexdump", "strings", "md5sum", "sha1sum", "sha256sum", "shasum", "sed", "awk",
+  "vi", "vim", "nvim", "nano", "emacs", "code", "subl", "cp", "mv", "ln", "chmod", "chown", "touch", "mkdir", "rm", "shellcheck", "shfmt",
+  "get-content", "gc", "type", "get-childitem", "gci", "dir", "select-string", "sls", "findstr", "test-path", "get-item", "gi", "get-filehash",
+  "copy-item", "cpi", "move-item", "mi", "remove-item", "ri", "del", "notepad"]);
+const GIT_FILE_COMMANDS = new Set(["add", "rm", "mv", "diff", "log", "show", "blame", "status", "checkout", "restore", "ls-files", "grep", "commit", "reset", "stash"]);
+const DATA = new Set(["echo", "printf", "write-output", "write-host"]);
+
 // A command guard matches where a command, or a path to the program it runs, starts: at its first
 // word, at an unquoted later word (`sudo npm run deploy`, `bash scripts/release.sh`), or after a `/`
 // in one (`./scripts/release.sh`). A match that starts inside a quoted argument (a commit message,
-// a grep pattern) is data, not a command. PowerShell is matched without regard to case, as it runs
-// commands. A line the reader cannot parse is also matched as plain text.
+// a grep pattern) is data, not a command, and so is an argument of a program that only handles
+// files (FILE_TOOLS). PowerShell is matched without regard to case, as it runs commands. A line the
+// reader cannot parse is also matched as plain text.
 export function guardMatches(pattern, command, { ps = false } = {}) {
   const { cmds, failed, complex } = shellCommands(command, { ps });
   if (complex || (failed && commandMatches(pattern, command))) return true;
   const re = pattern.match(/^\/(.+)\/([a-z]*)$/);
   for (const w of cmds) {
-    if (["echo", "printf", "write-output", "write-host"].includes(programName(w[0].text))) continue;
+    const st = commandStart(w), prog = programName(w[st].text);
+    if (DATA.has(prog)) continue;
+    const sub = w.slice(st + 1).find((x) => !/^-/.test(x.text))?.text;
+    const last = FILE_TOOLS.has(prog) || (prog === "git" && GIT_FILE_COMMANDS.has(sub)) ? st : w.length - 1;
     const sticky = re && new RegExp(re[1], re[2].replace(/[gy]/g, "") + (w.ps && !re[2].includes("i") ? "iy" : "y"));
     const lit = pattern.replace(/\s+/g, " ").trim();
     const norm = (t) => (w.ps ? t.toLowerCase() : t);
     const text = w.map((x) => x.text.replace(/\\/g, w.ps ? "/" : "\\")).join(" ");
     let at = 0;
     for (const [k, x] of w.entries()) {
+      if (k > last) break;
       if (!x.redir && (k === 0 || (!x.quoted && !/\s/.test(x.text)))) {
         for (let j = 0; j < x.text.length; j++) {
           if (j > 0 && !"/\\".includes(x.text[j - 1])) continue;

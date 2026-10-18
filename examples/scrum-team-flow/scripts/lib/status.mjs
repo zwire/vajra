@@ -25,8 +25,8 @@ export function describe(g, state, root) {
   return `${text}\n${tag} Waiting for the user to reply \`suspend\` (or \`reject <reason>\`) to your request to suspend the rails so you can ${state.request.reason}.`;
 }
 
-// How the agent asks to change what only a suspended rail lets it change.
-const askToSuspend = (root, why) => `run \`${flowCmd(root)} request suspend --reason "${why}"\` and ask the user to reply \`suspend\``;
+// How the agent asks to change what only a suspended rail lets it change; the user answers in the chat.
+export const askToSuspend = (root, why = "<what you will change>") => `run \`${flowCmd(root)} request suspend --reason "${why}"\`, then stop and ask the user to reply \`suspend\``;
 
 function describeState(g, state, root) {
   if (!g.ok) return `${tag} The workflow graph is invalid, so the rails are off until it validates: ${g.errors[0]}. To repair the skill, ${askToSuspend(root, "<what you will repair>")}.`;
