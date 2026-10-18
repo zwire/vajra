@@ -67,6 +67,6 @@ Read only what the current step needs.
 | [scripts/validate.mjs](scripts/validate.mjs) | Validator and graph renderer: `node scripts/validate.mjs <skill-dir> [--project <root>] --write-graph` |
 | [scripts/interview.mjs](scripts/interview.mjs) | Renders a consult round as chat text, a one-page form, or a local form that returns the answers as JSON |
 | [scripts/flow.mjs](scripts/flow.mjs) | Runtime copied into every generated skill: run state, transitions, checks; CLI, MCP server and lifecycle hooks |
-| [scripts/lib/](scripts/lib/) | The runtime's and the validator's modules, copied with `flow.mjs` and `validate.mjs`. The hooks' checks: [shell.mjs](scripts/lib/shell.mjs) reads shell lines, [tools.mjs](scripts/lib/tools.mjs) reads tool calls, [protect.mjs](scripts/lib/protect.mjs) decides what touches the run state or the rails |
+| [scripts/lib/](scripts/lib/) | The runtime's and the validator's modules, copied with `flow.mjs` and `validate.mjs`. The hooks' checks: [shell.mjs](scripts/lib/shell.mjs) reads shell lines, [tools.mjs](scripts/lib/tools.mjs) reads tool calls, [protect.mjs](scripts/lib/protect.mjs) decides what touches the run state or the rails, [settings.mjs](scripts/lib/settings.mjs) knows the agents' hook settings |
 | [references/rails.md](references/rails.md) | What the runtime enforces, the standards it follows, how to install it per agent, and the limits of enforcement |
 | [references/calibration.md](references/calibration.md) | Worked excerpts showing how concrete a domain model, a playbook and its rails should be |

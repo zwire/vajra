@@ -71,14 +71,16 @@ function editChange(ti) {
 // Windows; a shell tool other than Bash on Windows may run either, so it is read both ways.
 // Only the shell the line runs in is read: reading a Bash line as PowerShell as well found
 // deletions in ordinary lines (`rm -rf build/* && echo \`date\``), which was the hooks' worst source
-// of false blocks.
-const shellLine = (name, command) => ({ command, ps: /^(powershell|pwsh)$/.test(name) ? true : process.platform === "win32" && name !== "bash" ? "both" : false });
+// of false blocks. Only Claude Code's Bash is always a POSIX shell (Git Bash on Windows): Codex and
+// Copilot report their Windows shell, PowerShell, as Bash too, so there it is read both ways.
+const shellLine = (name, command, bashIsPosix) => ({ command, ps: /^(powershell|pwsh)$/.test(name) ? true : process.platform === "win32" && !(name === "bash" && bashIsPosix) ? "both" : false });
 
 // What a tool call does, as the hooks check it:
 //   { kind: "shell", lines: [{ command, ps }] }
 //   { kind: "edit", paths, change }       paths empty when the edit names no file the hook can find
 //   { kind: "other", readOnly, lines, code, prompts, values }   any other tool, read by its input
-export function toolAction(input) {
+// opts.bashIsPosix: false when the agent may report a PowerShell tool as Bash.
+export function toolAction(input, { bashIsPosix = true } = {}) {
   const name = String(input.tool_name || input.toolName || "").toLowerCase();
   const ti = toolInput(input);
   if (SHELL_TOOLS.has(name) || (!name && (ti.command || input.command))) {
@@ -86,7 +88,7 @@ export function toolAction(input) {
     let command = Array.isArray(c) ? quoteArgv(c) : String(c);
     // A shell call whose command sits under a field the hook does not know: read every value.
     if (!command.trim()) command = inputStrings(ti).map((x) => x.text).join("\n");
-    return { kind: "shell", lines: [shellLine(name, command)] };
+    return { kind: "shell", lines: [shellLine(name, command, bashIsPosix)] };
   }
   if (name === "apply_patch" || name === "applypatch") return { kind: "edit", paths: patchPaths(ti), change: editChange(ti) };
   if (EDIT_TOOLS.has(name)) {
@@ -100,7 +102,7 @@ export function toolAction(input) {
     kind: "other",
     name,
     readOnly: ((t) => READ_ONLY_TOOL.test(t) && !ACTING_WORD.test(t))(name.split(/__|[.:/]/).pop()),
-    lines: values.filter((x) => COMMAND_KEY.test(x.key)).map((x) => shellLine(name, x.text)),
+    lines: values.filter((x) => COMMAND_KEY.test(x.key)).map((x) => shellLine(name, x.text, bashIsPosix)),
     code: values.filter((x) => CODE_KEY.test(x.key)).map((x) => x.text),
     prompts: SUBAGENT.test(name) ? [] : values.filter((x) => PROMPT_KEY.test(x.key) || (MESSAGE_KEY.test(x.key) && SENDS.test(name))).map((x) => x.text),
     // Every value is checked as a path; prose resolves to no real path, so it does no harm.

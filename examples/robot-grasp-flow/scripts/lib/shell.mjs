@@ -151,6 +151,7 @@ function tokenize(s, ps, nested, bodies) {
 
 function readShell(s, depth, ps, ctx) {
   if (++ctx.reads > MAX_READS) throw new TooComplex("too many nested scripts");
+  if (ps && /\]\s*::|\)\s*\.\s*\w+\s*\(/.test(s)) ctx.code.push(s); // .NET calls: read as code by the callers
   const nested = [], bodies = [];
   const out = [];
   for (let w of tokenize(s, ps, nested, bodies)) {
@@ -215,14 +216,15 @@ function readShell(s, depth, ps, ctx) {
 // Reads a command line in the shell it runs in: POSIX (ps false), PowerShell (ps true), or both
 // (ps "both") when the shell is not known, so a check sees every way the line could run. `failed` is set when a reading failed (an unclosed quote, say);
 // callers then also check the raw text, so they fail closed. `complex` is set when the line is past
-// the reader's limits; callers refuse it outright.
+// the reader's limits; callers refuse it outright. `code` lists the PowerShell scripts that call
+// .NET, which can open any path, so callers read them as code.
 export function shellCommands(command, { ps = false } = {}) {
-  const cmds = [];
+  const cmds = [], code = [];
   let failed = false, complex = false;
   for (const dialect of ps === "both" ? [false, true] : [!!ps]) {
-    try { cmds.push(...readShell(String(command), 0, dialect, { seen: new Set(), reads: 0, chars: 0 })); } catch (e) { failed = true; if (e instanceof TooComplex) complex = true; }
+    try { cmds.push(...readShell(String(command), 0, dialect, { seen: new Set(), reads: 0, chars: 0, code })); } catch (e) { failed = true; if (e instanceof TooComplex) complex = true; }
   }
-  return { cmds, failed, complex };
+  return { cmds, failed, complex, code };
 }
 
 // A command guard matches where a command, or a path to the program it runs, starts: at its first

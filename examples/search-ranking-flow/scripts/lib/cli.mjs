@@ -8,6 +8,9 @@ import { needRun, approve, reject, cmdStart, cmdStep, cmdFinish, cmdExit, cmdLog
 import { statusText } from "./status.mjs";
 import { install } from "./install.mjs";
 
+// Who runs a command in their own terminal; a container may have no user name to give.
+const terminalUser = () => { try { return os.userInfo().username || "the user (terminal)"; } catch { return "the user (terminal)"; } };
+
 // Run one command against fresh state. Returns { code, text }; never prints.
 export function execute(cmd, pos, o, root) {
   const st = openStore(root);
@@ -26,8 +29,8 @@ export function execute(cmd, pos, o, root) {
       case "exit": cmdExit(g, state, st, pos, o); break;
       case "pause": needRun(state).paused = { note: o.note || "no note", at: now() }; st.log({ event: "pause", run: state.run.id, note: o.note }); break;
       case "resume": needRun(state).paused = null; st.log({ event: "resume", run: state.run.id }); break;
-      case "approve": { const n = approve(state, o.by || os.userInfo().username, o.note); st.log({ event: "approve", run: state.run.id, step: n, by: o.by || "cli" }); break; }
-      case "reject": { const n = reject(state, o.by || os.userInfo().username, o.reason); st.log({ event: "reject", run: state.run.id, step: n, reason: o.reason }); break; }
+      case "approve": { const n = approve(state, o.by || terminalUser(), o.note); st.log({ event: "approve", run: state.run.id, step: n, by: o.by || "cli" }); break; }
+      case "reject": { const n = reject(state, o.by || terminalUser(), o.reason); st.log({ event: "reject", run: state.run.id, step: n, reason: o.reason }); break; }
       default: throw new Stop(`unknown command "${cmd}"; run \`flow help\``, 2);
     }
     st.save(state);

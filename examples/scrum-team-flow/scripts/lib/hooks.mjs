@@ -1,7 +1,7 @@
 // The lifecycle hooks, the same for every agent: what to inject at session start and on prompts,
 // which tool calls to refuse, and when to bounce a stop. How a tool call is read is in tools.mjs,
-// shell.mjs and protect.mjs. runHook returns what to answer; flow.mjs writes it in the agent's
-// format, so the answer has one shape whichever part of the runtime produced it.
+// shell.mjs, protect.mjs and settings.mjs. runHook returns what to answer; flow.mjs writes it in
+// the agent's format, so the answer has one shape whichever part of the runtime produced it.
 
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,8 @@ import { skillDir, tag, relPath, railsLevel, flowCmd } from "./env.mjs";
 import { globToRegExp, stepCommands } from "./match.mjs";
 import { guardMatches } from "./shell.mjs";
 import { toolAction } from "./tools.mjs";
-import { shellViolation, dropsHooks, railsPaths, inside, samePath, codeTouchesRails, REPLY_WORD } from "./protect.mjs";
+import { shellViolation, codeTouchesRails, REPLY_WORD } from "./protect.mjs";
+import { dropsHooks, railsPaths, inside, samePath } from "./settings.mjs";
 import { openStore } from "./store.mjs";
 import { loadGraph } from "./graph.mjs";
 import { blockingGate, guardedStep, approve, reject } from "./run.mjs";
@@ -67,10 +68,10 @@ function railsCheck(act, g, root, cwd) {
   return null;
 }
 
-function preToolUse(g, state, input, root) {
+function preToolUse(g, state, input, root, opts) {
   const rails = railsLevel(g);
   if (state.suspended || (g.ok && rails === "advisory")) return null;
-  const act = toolAction(input);
+  const act = toolAction(input, opts);
   const cwd = input.cwd || root;
   const own = railsCheck(act, g, root, cwd);
   if (own || !g.ok) return own;
@@ -141,7 +142,8 @@ function stopCheck(g, state, input, root) {
 //   { context: text, event }   context for the agent (event: the hook event name to report)
 //   { deny: reason }           refuse the tool call
 //   { block: reason }          bounce the stop
-export function runHook(event, input, root) {
+// opts are passed to toolAction (which shell a Bash tool runs).
+export function runHook(event, input, root, opts = {}) {
   const g = loadGraph(root);
   const st = openStore(root);
   const state = st.load();
@@ -166,7 +168,7 @@ export function runHook(event, input, root) {
     return { context: note + describe(g, state, root), event: event_ };
   }
   if (event === "pre-tool-use") {
-    const reason = preToolUse(g, state, input, root);
+    const reason = preToolUse(g, state, input, root, opts);
     if (!reason) return null;
     st.log({ event: "block-tool", tool: input.tool_name, reason });
     return { deny: reason };

@@ -10,7 +10,7 @@ export const SCHEMA = 2;
 export const RUNTIME = [
   "flow.mjs", "validate.mjs",
   ...["contract", "frontmatter", "match", "bindings", "playbook", "profile", "skill", "mermaid",
-    "shell", "tools", "protect", "env", "store", "graph", "run", "status", "cli", "install", "hooks", "mcp"].map((m) => `lib/${m}.mjs`),
+    "shell", "tools", "protect", "settings", "env", "store", "graph", "run", "status", "cli", "install", "hooks", "mcp"].map((m) => `lib/${m}.mjs`),
 ];
 
 export const PHASES = ["explore", "expand", "extract", "any"];

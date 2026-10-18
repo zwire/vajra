@@ -1142,3 +1142,66 @@ test("while a guarded command's binding is unset, commands run and the agent is 
   // The rails' own protections do not wait for the bindings.
   assert.equal(p.bash("rm -rf .flow").status, 2);
 });
+
+test("a redirection writes its path whatever the program, and an input redirection only reads", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const rel = path.relative(p.proj, p.skill);
+  for (const c of [
+    `cat /tmp/x > ${rel}/playbooks/ship.md`, "cat /tmp/x >> .claude/settings.json", `git log > ${rel}/profile.md`,
+    "jq . /tmp/h.json > .github/hooks/evil.json", `node -e "1" > ${rel}/SKILL.md`, "sed 'w .claude/settings.json' x",
+  ]) assert.equal(p.bash(c).status, 2, c);
+  for (const c of [
+    "jq .run < .flow/demo-flow/state.json", "wc -l < .flow/demo-flow/log.jsonl", "while read l; do echo $l; done < .flow/demo-flow/log.jsonl",
+    `sed -n 1,5p ${rel}/playbooks/ship.md`, `awk 'NR<3' ${rel}/SKILL.md`, `rg -n gate ${rel}/playbooks`, `find ${rel} -name '*.md'`, `less ${rel}/SKILL.md`,
+  ]) assert.equal(p.bash(c).status, 0, c);
+  for (const c of [`sed -i s/a/b/ ${rel}/SKILL.md`, `find ${rel} -delete`, `sort -o ${rel}/SKILL.md x`]) assert.equal(p.bash(c).status, 2, c);
+});
+
+test("paths are checked from every folder a line changes to", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const rel = path.relative(p.proj, p.skill);
+  const ps = (command) => p.hook("pre-tool-use", { tool_name: "PowerShell", tool_input: { command } }).status;
+  for (const c of ["cd .claude && rm settings.json", "pushd .claude; rm settings.json", "cd .github && rm -rf hooks", "cd .claude && echo '{}' > settings.json", "cd .flow/demo-flow && rm state.json"]) assert.equal(p.bash(c).status, 2, c);
+  for (const c of ["Set-Location .claude; Remove-Item settings.json", "cd .flow; Remove-Item demo-flow -Recurse"]) assert.equal(ps(c), 2, c);
+  // Moving there is harmless in itself.
+  for (const c of [`cd ${rel} && ls`, "cd .flow && ls", `cd ${rel}/scripts && node validate.mjs ..`, "cd src && rm -rf build", "cd .. && ls"]) assert.equal(p.bash(c).status, 0, c);
+});
+
+test("PowerShell that calls .NET, or makes a link, is read for the state and the rails", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const rel = path.relative(p.proj, p.skill).replace(/\//g, "\\");
+  const ps = (command) => p.hook("pre-tool-use", { tool_name: "PowerShell", tool_input: { command } }).status;
+  for (const c of [
+    "[IO.File]::WriteAllText('.flow/demo-flow/state.json','{}')", `[System.IO.File]::Delete("${rel}\\profile.md")`, "(Get-Item .flow).Delete()",
+    "New-Item -ItemType SymbolicLink -Path x -Target .flow", "New-Item -ItemType Junction -Name j -Value .flow",
+  ]) assert.equal(ps(c), 2, c);
+  for (const c of ["[IO.File]::WriteAllText('notes.txt', 'x')", "[DateTime]::Now", "New-Item -ItemType File notes.txt -Value '.flow/*/state.json'"]) assert.equal(ps(c), 0, c);
+});
+
+test("on Windows, Codex's and Copilot's Bash is read as PowerShell too, and Claude Code's is not", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  const preload = path.join(p.proj, "win32.cjs");
+  fs.writeFileSync(preload, 'Object.defineProperty(process, "platform", { value: "win32" });\n');
+  const flow = path.join(p.skill, "scripts", "flow.mjs");
+  const run = (agent, command, extra = {}) => denied(spawnSync(process.execPath, ["-r", preload, flow, "hook", "pre-tool-use", "--agent", agent], {
+    cwd: p.proj, encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: "", FLOW_ROOT: "", ...extra },
+    input: JSON.stringify({ cwd: p.proj, tool_name: "Bash", tool_input: { command } }),
+  })).status;
+  // PowerShell's * matches .flow; a POSIX shell's does not.
+  assert.equal(run("codex", "Remove-Item * -Recurse"), 2);
+  assert.equal(run("copilot", "Remove-Item * -Recurse"), 2);
+  assert.equal(run("claude", "Remove-Item * -Recurse", { CLAUDE_PROJECT_DIR: p.proj }), 0);
+  assert.equal(run("claude", "rm -rf build/* && echo `date`", { CLAUDE_PROJECT_DIR: p.proj }), 0);
+});
+
+test("a project script whose name ends in flow.mjs is not the runtime", () => {
+  const p = project();
+  p.cli("start", "spike", "--request", "try it");
+  for (const c of ["node scripts/workflow.mjs", "node dataflow.mjs --dry-run", `node -e "import('./workflow.mjs')"`]) assert.equal(p.bash(c).status, 0, c);
+  const rel = path.relative(p.proj, p.skill);
+  for (const c of [`node ${rel}/scripts/flow.mjs approve`, `node -e "import('./${rel}/scripts/flow.mjs')"`]) assert.equal(p.bash(c).status, 2, c);
+});
