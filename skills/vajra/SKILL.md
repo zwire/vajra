@@ -34,8 +34,9 @@ The output runs **on rails**: every generated skill carries `scripts/flow.mjs`, 
 | Get advice on what workflow is needed, without generating yet | Consult | [workflows/consult.md](workflows/consult.md) |
 | Change an existing generated skill (retro findings, new phase, too heavy or too light) | Evolve | [workflows/evolve.md](workflows/evolve.md) |
 | Explain, visualize or check an existing generated skill | Inspect | [workflows/inspect.md](workflows/inspect.md) |
+| Bring generated skills up to date after vajra was updated | Update | [workflows/evolve.md](workflows/evolve.md#update-to-a-new-vajra) |
 
-When unclear, default to **Generate** if no generated skill exists in the project, otherwise **Evolve**. Generate and Evolve both run a Consult session inside them.
+When unclear, default to **Generate** if no generated skill exists in the project, otherwise **Evolve**. Generate and Evolve both run a Consult session inside them. Whatever the mode, first validate the project's generated skills; if one was made by an older vajra, offer **Update** before anything else.
 
 ## Operating rules
 
