@@ -85,7 +85,7 @@ node <your-flow>/scripts/flow.mjs install --harness claude,codex,copilot   # any
 | Let the agent change the workflow itself (a playbook, the project's values, vajra Evolve) | When the agent asks to suspend the rails and says what it will change, tap a choice or answer in your own words. It turns them back on when it is done |
 | See where the run is, or what happened | Ask the agent; it runs `flow status` and `flow log` |
 
-Every decision is a question the agent puts to you, so a phone is enough, including for an agent running in the cloud. Where the agent has a choice dialog (Claude Code's AskUserQuestion) you tap a choice; otherwise, or whenever you prefer, you answer in your own words. The agent records what you meant, quoting you, and the rails accept it only if you sent those words after the question was asked: they never parse your wording or the host's message format, and the agent cannot answer for you. With the optional MCP server, clients that support elicitation show the choices as a dialog. If you do have a terminal, the same decisions work there: `node <your-flow>/scripts/flow.mjs approve --by <you>`, `reject --reason "..."`, `suspend` and `unsuspend`.
+Every decision is a question the agent puts to you, so a phone is enough, including for an agent running in the cloud. Where the agent has a choice dialog (Claude Code's AskUserQuestion) you tap a choice; otherwise, or whenever you prefer, you answer in your own words. The agent records what you meant, and the rails accept it only once you have replied since the question was asked: they never parse your wording or the host's message format, and the agent cannot answer for you. Once you have answered, you are not asked again. With the optional MCP server, clients that support elicitation show the choices as a dialog. If you do have a terminal, the same decisions work there: `node <your-flow>/scripts/flow.mjs approve --by <you>`, `reject --reason "..."`, `suspend` and `unsuspend`.
 
 The agent's side (`flow start`, `step`, `finish`, `exit`) is written into your skill's `SKILL.md`, so you never type it. Your repository's commands and paths live in `.flow/your-flow/project.md`; commit it. Run state and history live next to it; commit them for an audit trail or ignore `.flow/*/state.json`, `log.jsonl` and `runs/`.
 
@@ -205,11 +205,11 @@ $ (agent) abctl ramp search-ranker-0412 --percent 1
 [search-ranking-flow] Blocked: `abctl ramp` belongs to step 4 and step 2 [human-gate] is not approved. Run `flow step 2`, then stop and ask the user.
 $ flow step 2
 STOP. Step 2 is a human gate: "The product owner approves the held-out evaluation and the 1% stage."
-Present what the user needs to decide, then ask the user whether step 2 may pass, with your choice tool if you have one (Approve / Reject), or in plain words, and end your turn. […]
+Present what the user needs to decide, then ask the user whether step 2 may pass with your tool for putting choices to the user (a dialog or buttons: Approve / Reject), in plain words only if you have none, and end your turn. […]
 $ (agent) flow approve
 [search-ranking-flow] Blocked: only the user can approve, reject or suspend, and flow.mjs hook and mcp are run by the agent harness, not from the shell. At a human gate, stop and ask the user whether step <n> may pass, […]
 > (user) looks good, go to 1%
-$ (agent) flow answer approve --quote "looks good, go to 1%"
+$ (agent) flow answer approve
 [search-ranking-flow] Recorded: the user approved step 2. Tell them so in a line.
 $ (agent) abctl ramp search-ranker-0412 --percent 1                    # allowed
 $ flow step 3 --evidence "..."; flow step 4 --evidence "1% started"
@@ -223,7 +223,7 @@ $ (agent) abctl ramp search-ranker-0412 --percent 50
 |---|---|
 | Only declared exits, only after "Done when" | `flow exit` refuses anything else; `flow finish` needs every step recorded |
 | Checks decide the branch | `checks:` run on finish; exits marked `on: pass` / `on: fail` open accordingly |
-| Human gates pass only by the human | The human answers in a choice dialog or in their own words, and the agent records it with `flow answer`, quoting them; it counts only if the human sent those words (or tapped that choice in a dialog the agent could not pre-fill) after the question. Or the human runs `flow approve` in their own terminal; the agent's attempts are blocked |
+| Human gates pass only by the human | The human answers in a choice dialog or in their own words, and the agent records it with `flow answer`; it counts only once the human has replied (or tapped a choice in a dialog the agent could not pre-fill) since the question. Or the human runs `flow approve` in their own terminal; the agent's attempts are blocked |
 | Only the human switches the rails off | The agent asks with `flow request suspend --reason "..."`; they are suspended only when the human then says yes, recorded the same way. The agent turns them back on with `flow unsuspend` |
 | Irreversible commands wait for their gate | The tool hook matches `irreversible:` patterns and checks the gate before the step the command belongs to. When steps behind different gates run the same command (two ramp stages), it is matched against each step's own command, and a later stage never passes on an earlier stage's approval |
 | Throwaway stays throwaway | `writes: [${scratch}/**]` limits edits while a throwaway playbook is active; `writes: []` makes a playbook read-only |
