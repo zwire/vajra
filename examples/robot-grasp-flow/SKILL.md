@@ -18,7 +18,7 @@ A `${...}` in a playbook is a project binding: a command, path or other value th
 
 1. Match the request to one playbook below and run `flow start <playbook> --request "<one line>"`. Read the playbook file.
 2. Do its steps in order. After each, run `flow step <n> --evidence "<what shows it>"`, or `--skip "<reason>"`. Never drop a step silently.
-3. At a `[human-gate]` step, run `flow step <n>`, present what the user must decide, and end your turn. Only the user can pass the gate.
+3. At a `[human-gate]` step, run `flow step <n>`, present what the user must decide, put Approve / Reject to them with your choice dialog or buttons (in plain words only if you have none), and end your turn. When they answer, however they put it, record it with `flow answer approve` or `flow answer reject --note "<why>"` without asking again. Only the user can pass the gate.
 4. When every step is recorded, run `flow finish --evidence "<what proves Done when>"`. It runs the playbook's checks and lists the open exits.
 5. Take the exit whose condition holds: `flow exit <to> --because "<why>"`. The next playbook starts; follow-ups stay in the current run.
 6. To stop mid-playbook, run `flow pause --note "<handoff>"` first.

@@ -20,11 +20,11 @@
 //   flow request suspend --reason "<what you need to change>"   ask the user to suspend the rails
 //   flow request cancel                                         withdraw that request
 //   flow unsuspend                                              turn the rails back on
-//   flow answer approve|reject|suspend|decline --quote "<the user's words>"   record the user's answer
+//   flow answer approve|reject|suspend|decline [--note "<why>"]   record the user's answer
 // The human answers a [human-gate] or a suspend request as they would anyone: a choice in the
 // agent's question dialog, or a reply in their own words. The agent records what they meant with
-// `flow answer`, quoting them, and the rails accept it only if the user sent those words after the
-// question was asked (see "the user's answers" below). Nothing needs a terminal, though these still
+// `flow answer`, and the rails accept it only once the user has replied since the question was
+// asked (see "the user's answers" below). Nothing needs a terminal, though these still
 // work in the human's own one (the hooks block the agent from running them):
 //   flow approve [--by <name>] [--note <text>]    resume the interrupted [human-gate]
 //   flow reject --reason <text>                   refuse it
@@ -101,14 +101,13 @@ function saveState(root, state, event) {
 // ---------- the user's answers ----------
 // A [human-gate] and a suspend request wait for the user, who answers as they would anyone: a
 // choice in the agent's question dialog, or a reply in their own words. The agent records what
-// they meant with `flow answer`, quoting them. The rails do not read the words; they keep every
-// message the user sends while a question waits (the prompt hook runs only on the user's prompts,
-// and a choice dialog's picks are kept too, see lib/ask.mjs), and accept a quote only from one sent
-// after the question was asked. So the agent cannot answer before the user has, or in words the
-// user did not write. This lives here, not in lib/, so a suspend request can be answered while
+// they meant with `flow answer`. The rails do not read the words; they keep every message the user
+// sends while a question waits (the prompt hook runs only on the user's prompts, and a choice
+// dialog's picks are kept too, see lib/ask.mjs), and accept an answer only once one has come since
+// the question was asked, so the agent cannot answer before the user has. What the user sent is
+// logged with the answer. This lives here, not in lib/, so a suspend request can be answered while
 // lib/ is broken: that is when the user most needs to let the agent repair the skill.
 const MAX_HEARD = 20;
-const norm = (t) => String(t ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 function hear(root, texts) {
   const state = loadState(root);
   if (state.suspended || !(state.request || state.run?.awaiting) || !texts.length) return;
@@ -116,24 +115,25 @@ function hear(root, texts) {
   state.heard = [...(state.heard || []), ...texts.map((text) => ({ at, text: String(text).slice(0, 20000) }))].slice(-MAX_HEARD);
   saveState(root, state, { event: "heard", count: texts.length });
 }
-// Whether the user sent the quoted words after `since`.
-const quoted = (state, since, quote) => !!norm(quote) && (state.heard || []).some((h) => h.at >= since && norm(h.text).includes(norm(quote)));
+// What the user sent after `since`.
+const repliesSince = (state, since) => (state.heard || []).filter((h) => h.at >= since).map((h) => h.text);
 
-// `flow answer approve|reject|suspend|decline --quote "<the user's words>" [--note <text>]`
+// `flow answer approve|reject|suspend|decline [--note <text>]`
 function answerCmd(root, verb, o) {
   const state = loadState(root);
   const v = String(verb || "").toLowerCase();
-  const usage = { code: 2, text: 'usage: flow answer approve|reject|suspend|decline --quote "<the user\'s words>" [--note "<text>"]' };
-  if (!["approve", "reject", "suspend", "decline"].includes(v) || typeof o.quote !== "string") return usage;
+  if (!["approve", "reject", "suspend", "decline"].includes(v)) return { code: 2, text: 'usage: flow answer approve|reject|suspend|decline [--note "<why>"]' };
+  const note = typeof o.note === "string" && o.note.trim() ? o.note.trim() : undefined;
   const forGate = v === "approve" || v === "reject";
   const since = forGate ? state.run?.awaiting?.since : state.request?.since;
   if (state.suspended || !since) return { code: 1, text: `${tag} No ${forGate ? "human gate" : "suspend request"} is waiting for an answer.` };
-  if (!quoted(state, since, o.quote)) return { code: 1, text: `${tag} The user has not sent those words since you asked, so nothing is recorded. Wait for their answer and quote their own words.` };
-  const by = `the user, who said "${o.quote.trim().slice(0, 200)}"`;
-  if (!forGate) return { code: 0, text: v === "suspend" ? suspension.grant(root, by, o.note) : suspension.refuse(root, by, o.note) };
+  const said = repliesSince(state, since);
+  if (!said.length) return { code: 1, text: `${tag} The user has not replied since you asked, so nothing is recorded. End your turn and wait for their answer.` };
+  const heard = said.join("\n").slice(-1000);
+  if (!forGate) return { code: 0, text: v === "suspend" ? suspension.grant(root, "the user", note, heard) : suspension.refuse(root, "the user", note, heard) };
   if (loadError) return { code: 1, text: `${tag} the runtime did not load (${loadError}), so the gate cannot be recorded. Tell the user.` };
-  const n = (v === "approve" ? lib.approve : lib.reject)(state, by, o.note || (v === "reject" ? o.quote.trim() : undefined));
-  saveState(root, state, { event: v, run: state.run.id, playbook: state.run.playbook, step: n, by: "user", quote: o.quote.slice(0, 200) });
+  const n = (v === "approve" ? lib.approve : lib.reject)(state, "the user", note);
+  saveState(root, state, { event: v, run: state.run.id, playbook: state.run.playbook, step: n, by: "user", ...(note ? { note } : {}), heard });
   return { code: 0, text: `${tag} Recorded: the user ${v === "approve" ? "approved" : "rejected"} step ${n}. Tell them so in a line.` };
 }
 
@@ -150,7 +150,7 @@ export const suspension = {
     if (typeof reason !== "string" || !reason.trim()) return { code: 2, text: 'usage: flow request suspend --reason "<what you need to change, and why>"' };
     state.request = { action: "suspend", reason: reason.trim(), since: new Date().toISOString() };
     saveState(root, state, { event: "request", action: "suspend", reason: state.request.reason });
-    return { code: 3, text: `STOP. Ask the user to suspend the rails so you can ${state.request.reason}.\nWhile they are suspended nothing is enforced: guarded commands run and every file may change, until you run \`${flowRel(root)} unsuspend\`. Tell the user what you will change and ask whether to suspend the rails for it, with your choice tool if you have one or in plain words, then end your turn. When they answer, record what they meant with \`${flowRel(root)} answer suspend|decline --quote "<their words>"\`. Only the user can allow it, or they run \`flow suspend\` themselves.` };
+    return { code: 3, text: `STOP. Ask the user to suspend the rails so you can ${state.request.reason}.\nWhile they are suspended nothing is enforced: guarded commands run and every file may change, until you run \`${flowRel(root)} unsuspend\`. Tell the user what you will change and ask whether to suspend the rails for it with your tool for putting choices to the user (a dialog or buttons: Suspend / Keep the rails on), in plain words only if you have none, and end your turn. When they answer, record what they meant, however they put it, with \`${flowRel(root)} answer suspend\` or \`${flowRel(root)} answer decline\`. Only the user can allow it, or they run \`flow suspend\` themselves.` };
   },
   cancel(root) {
     const state = loadState(root);
@@ -161,19 +161,19 @@ export const suspension = {
     return { code: 0, text: `${tag} The suspend request is withdrawn.` };
   },
   // The human's answer, recorded by `flow answer` or an elicitation dialog. `by` says which.
-  grant(root, by, note) {
+  grant(root, by, note, heard) {
     const state = loadState(root);
     const reason = state.request?.reason;
     state.suspended = true;
     state.request = null;
-    saveState(root, state, { event: "suspend", by, reason, ...(note ? { note } : {}) });
+    saveState(root, state, { event: "suspend", by, reason, ...(note ? { note } : {}), ...(heard ? { heard } : {}) });
     return `${tag} The user suspended the rails${reason ? ` so you can ${reason}` : ""}. Do only that, then run \`${flowRel(root)} unsuspend\`.`;
   },
-  refuse(root, by, why) {
+  refuse(root, by, why, heard) {
     const state = loadState(root);
     const reason = state.request?.reason;
     state.request = null;
-    saveState(root, state, { event: "reject-request", by, reason, why: why || "no reason given" });
+    saveState(root, state, { event: "reject-request", by, reason, why: why || "no reason given", ...(heard ? { heard } : {}) });
     return `${tag} The user did not suspend the rails${why ? `: ${why}` : ""}. Carry on without changing the workflow's own files.`;
   },
 };
@@ -212,7 +212,8 @@ const NAMES_PROMPT = /\b(claude|codex|copilot)\b|"(prompt|message|text)"\s*:/i;
 // The one call that names flow.mjs and still goes through: asking to suspend the rails (or turning
 // them back on), written plainly, so the agent can ask the user to let it repair the skill.
 const FLOW_PATH = `(?:"[^"\`$]*flow\\.mjs"|'[^']*flow\\.mjs'|[^\\s"'\`$;&|<>()]*flow\\.mjs)`;
-const ASK_TO_REPAIR = new RegExp(`^\\s*node\\s+${FLOW_PATH}\\s+(?:unsuspend|request\\s+cancel|(?:request\\s+suspend\\s+--reason|answer\\s+(?:suspend|decline)\\s+--quote)\\s+(?:"[^"\`$\\\\]*"|'[^']*'))\\s*$`);
+const QUOTED = `(?:"[^"\`$\\\\]*"|'[^']*')`;
+const ASK_TO_REPAIR = new RegExp(`^\\s*node\\s+${FLOW_PATH}\\s+(?:unsuspend|request\\s+cancel|request\\s+suspend\\s+--reason\\s+${QUOTED}|answer\\s+(?:suspend|decline)(?:\\s+--note\\s+${QUOTED})?)\\s*$`);
 
 function degradedHook(event, e, input, raw, root, format) {
   const state = loadState(root);
@@ -234,7 +235,7 @@ function degradedHook(event, e, input, raw, root, format) {
     return 0;
   }
   if ((event === "session-start" || event === "user-prompt") && !suspended) {
-    const degraded = `${tag} The rails are degraded (${e.message}): only calls that name the workflow's own files are blocked. Tell the user, who can copy the runtime from vajra again. To repair it yourself, run \`${flowRel(root)} request suspend --reason "<what you will repair>"\` and ask the user whether to suspend the rails for it.`;
+    const degraded = `${tag} The rails are degraded (${e.message}): only calls that name the workflow's own files are blocked. Tell the user, who can copy the runtime from vajra again. To repair it yourself, ${state.request ? `your request to suspend the rails waits for the user: once they have answered, record what they meant with \`${flowRel(root)} answer suspend\` or \`${flowRel(root)} answer decline\`, without asking again` : `run \`${flowRel(root)} request suspend --reason "<what you will repair>"\` and ask the user whether to suspend the rails for it`}.`;
     console.log(context(event === "user-prompt" ? "UserPromptSubmit" : "SessionStart", degraded, format));
   }
   return 0;

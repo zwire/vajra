@@ -2,12 +2,12 @@
 
 import { tag, RESOLVED, flowCmd } from "./env.mjs";
 import { allowedExits } from "./run.mjs";
-import { askAtGate, askSuspend } from "./reply.mjs";
+import { askSuspend, awaitGate, awaitSuspend } from "./reply.mjs";
 
 export function nextHint(node, run, root) {
   const f = flowCmd(root);
   if (run.paused) return `the run is paused (${run.paused.note}); continue with \`${f} resume\``;
-  if (run.awaiting) return `waiting for the human at step ${run.awaiting.step}; stop and ${askAtGate(run.awaiting.step, f)}`;
+  if (run.awaiting) return `step ${run.awaiting.step} is a human gate waiting for the user: ${awaitGate(run.awaiting.step, f)}`;
   const pending = node.steps.find((s) => run.steps[s.n].status === "pending");
   if (pending) {
     return pending.humanGate
@@ -23,7 +23,7 @@ export function nextHint(node, run, root) {
 export function describe(g, state, root) {
   const text = describeState(g, state, root);
   if (!state.request || state.suspended) return text;
-  return `${text}\n${tag} Waiting for the user to answer your request to suspend the rails so you can ${state.request.reason}: ${askSuspend(flowCmd(root))}.`;
+  return `${text}\n${tag} Your request to suspend the rails so you can ${state.request.reason} waits for the user: ${awaitSuspend(flowCmd(root))}.`;
 }
 
 // How the agent asks to change what only a suspended rail lets it change.

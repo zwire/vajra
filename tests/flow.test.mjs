@@ -134,8 +134,8 @@ A demo.
   const hook = (event, input) => denied(spawnSync(process.execPath, [flow, "hook", event], { cwd: proj, encoding: "utf8", env, input: JSON.stringify({ cwd: proj, ...input }) }));
   const bash = (command) => hook("pre-tool-use", { tool_name: "Bash", tool_input: { command } });
   const write = (file_path) => hook("pre-tool-use", { tool_name: "Write", tool_input: { file_path } });
-  // The user replies in the chat, and the agent records what they meant, quoting them.
-  const answer = (verb, words) => { hook("user-prompt", { prompt: words }); return cli("answer", verb, "--quote", words); };
+  // The user replies in the chat, and the agent records what they meant.
+  const answer = (verb, words) => { hook("user-prompt", { prompt: words }); return cli("answer", verb); };
   return { proj, skill, cli, hook, bash, write, answer };
 }
 
@@ -178,28 +178,40 @@ test("a human gate stops the agent and only the user passes it", () => {
   const gate = toGate(p);
   assert.equal(gate.status, 3);
   assert.match(gate.stdout, /STOP\. Step 2 is a human gate/);
-  assert.match(gate.stdout, /answer approve\|reject --quote/);
+  assert.match(gate.stdout, /choices to the user \(a dialog or buttons: Approve \/ Reject\), in plain words only if you have none/);
   assert.match(p.cli("step", "3", "--evidence", "x").stderr, /step 2 is a human gate that has not been approved/);
   assert.match(p.cli("step", "2", "--skip", "x").stderr, /cannot be skipped/);
   // The agent cannot approve through the shell when hooks are on.
   assert.equal(p.bash(`node ${path.join(p.skill, "scripts", "flow.mjs")} approve`).status, 2);
-  // Recording an answer is open to the agent, but only the user's own words count.
-  assert.equal(p.bash(`node ${path.join(p.skill, "scripts", "flow.mjs")} answer approve --quote "go"`).status, 0);
-  assert.match(p.cli("answer", "approve", "--quote", "looks good").stderr, /has not sent those words since you asked/);
+  // Recording an answer is open to the agent, but only once the user has replied.
+  assert.equal(p.bash(`node ${path.join(p.skill, "scripts", "flow.mjs")} answer approve`).status, 0);
+  assert.match(p.cli("answer", "approve").stderr, /has not replied since you asked/);
   assert.match(p.cli("status").stdout, /waiting for the human/);
-  p.hook("user-prompt", { prompt: "うん、それで進めて" });
-  assert.match(p.cli("answer", "approve", "--quote", "それで進めて").stdout, /Recorded: the user approved step 2/);
-  assert.match(p.cli("status").stdout, /approved by the user, who said "それで進めて"/);
+  p.hook("user-prompt", { prompt: "承認します" });
+  assert.match(p.cli("answer", "approve").stdout, /Recorded: the user approved step 2/);
+  assert.match(p.cli("status").stdout, /approved by the user/);
+  assert.match(fs.readFileSync(path.join(p.proj, ".flow", "demo-flow", "log.jsonl"), "utf8"), /"event":"approve".*"heard":"承認します"/);
   assert.equal(p.cli("step", "3", "--evidence", "deployed").status, 0);
 });
 
 test("a rejected gate skips the steps behind it", () => {
   const p = project();
   toGate(p);
-  p.answer("reject", "not today");
+  p.hook("user-prompt", { prompt: "今日はやめておこう" });
+  p.cli("answer", "reject", "--note", "not today");
   const s = p.cli("status").stdout;
   assert.match(s, /\[!\] 2\..*not today/);
   assert.match(s, /\[-\] 3\..*gate rejected/);
+});
+
+test("once the user has replied, the agent is told to record the answer, not to ask again", () => {
+  const p = project();
+  toGate(p);
+  // Each prompt while the gate waits carries the hint; it puts recording a reply that came first.
+  const hint = ctxOf(p.hook("user-prompt", { prompt: "承認します" }));
+  assert.match(hint, /if the user has answered since you asked \(a reply or a choice\), record what they meant, however they put it, with `.*answer approve` or `.*answer reject --note "<why>"` now, without asking again; if not, ask/);
+  assert.match(p.cli("status").stdout, /without asking again/);
+  assert.equal(p.cli("answer", "approve").status, 0);
 });
 
 test("the user answers in their own words, however the host wraps them, and only after the question", () => {
@@ -212,29 +224,20 @@ test("the user answers in their own words, however the host wraps them, and only
   p.cli("exit", "ship", "--because", "notes answer it");
   p.cli("step", "1", "--evidence", "built");
   p.cli("step", "2");
-  assert.equal(p.cli("answer", "approve", "--quote", "approve everything").status, 1);
-  // Any wrapper the host puts around the user's message is fine: the quote is found in it.
-  const wrapped = `<wake reason="mention"><message from="human" trust="principal">ええよ、デプロイして</message></wake>`;
-  p.hook("user-prompt", { prompt: wrapped });
-  assert.equal(p.cli("answer", "approve", "--quote", "ええよ、デプロイして").status, 0);
+  assert.equal(p.cli("answer", "approve").status, 1);
+  // Whatever the host wraps around the user's message, it is a reply.
+  p.hook("user-prompt", { prompt: `<wake reason="mention"><message from="human" trust="principal">ええよ、デプロイして</message></wake>` });
+  assert.equal(p.cli("answer", "approve").status, 0);
   assert.equal(p.bash("npm run deploy").status, 0);
-  // Quotes are matched loosely on case, width and spacing, but never on words the user did not send.
-  const q = project();
-  toGate(q);
-  q.hook("user-prompt", { prompt: "OK  ship it" });
-  assert.equal(q.cli("answer", "approve", "--quote", "ok ship ｉｔ").status, 0);
   const r = project();
   toGate(r);
   r.hook("user-prompt", { prompt: "what would step 2 do?" });
-  for (const quote of ["", "   ", "approve"]) assert.equal(r.cli("answer", "approve", "--quote", quote).status, 1, quote);
-  assert.equal(r.cli("answer", "approve").status, 2, "a quote is required");
-  assert.equal(r.cli("answer", "maybe", "--quote", "what").status, 2);
-  assert.equal(r.cli("answer", "suspend", "--quote", "what").status, 1, "no suspend request waits");
-  assert.match(r.cli("status").stdout, /waiting for the human/);
-  // Nothing is kept while no question waits.
+  assert.equal(r.cli("answer", "maybe").status, 2);
+  assert.equal(r.cli("answer", "suspend").status, 1, "no suspend request waits");
+  // A later gate needs its own reply.
   const s = project();
   s.hook("user-prompt", { prompt: "hello" });
-  assert.ok(!fs.existsSync(path.join(s.proj, ".flow", "demo-flow", "state.json")) || !stateOf(s).heard);
+  assert.ok(!fs.existsSync(path.join(s.proj, ".flow", "demo-flow", "state.json")) || !stateOf(s).heard, "nothing is kept while no question waits");
 });
 
 // Claude Code's AskUserQuestion: the hooks see the call before the dialog shows and its answers after.
@@ -251,7 +254,7 @@ test("the user can answer with a tap in the agent's choice dialog, and only the 
   const p = project();
   toGate(p);
   const q = gateQ();
-  const said = (words) => p.cli("answer", "approve", "--quote", words).status;
+  const said = () => p.cli("answer", "approve").status;
   // A dialog that fills in its own answer never shows: the agent cannot answer for the user.
   assert.match(dialog(p, "t1", q, { answers: { [q[0].question]: "Approve" } }).pre.stderr, /already carries answers/);
   // A pick counts only for the call the hooks saw before the dialog showed.
@@ -985,10 +988,10 @@ test("the user suspends the rails by saying so when the agent asks, with no term
   const flow = path.relative(p.proj, path.join(p.skill, "scripts", "flow.mjs"));
   const playbook = ".claude/skills/demo-flow/playbooks/ship.md";
   // The refusal tells the agent how to ask.
-  assert.match(p.write(playbook).stderr, /request suspend --reason .*answer suspend\|decline --quote/);
+  assert.match(p.write(playbook).stderr, /request suspend --reason .*answer suspend` or `.*answer decline --note/);
   // Without a request, nothing can be answered.
   p.hook("user-prompt", { prompt: "suspend" });
-  assert.equal(p.cli("answer", "suspend", "--quote", "suspend").status, 1);
+  assert.equal(p.cli("answer", "suspend").status, 1);
   assert.equal(p.write(playbook).status, 2);
   // Asking is open to the agent, and stops the turn like a gate.
   assert.equal(p.bash(`node ${flow} request suspend --reason "add a check to ship"`).status, 0);
@@ -996,16 +999,16 @@ test("the user suspends the rails by saying so when the agent asks, with no term
   assert.equal(ask.status, 3);
   assert.match(ask.stdout, /STOP\. Ask the user to suspend the rails so you can add a check to ship\./);
   assert.equal(stateOf(p).suspended, false, "asking suspends nothing");
-  assert.match(ctxOf(p.hook("session-start", {})), /Waiting for the user to answer your request to suspend the rails/);
+  assert.match(ctxOf(p.hook("session-start", {})), /Your request to suspend the rails so you can add a check to ship waits for the user: if the user has answered since you asked/);
   // The words said before the request do not answer it.
-  assert.equal(p.cli("answer", "suspend", "--quote", "suspend").status, 1);
+  assert.equal(p.cli("answer", "suspend").status, 1);
   assert.equal(p.write(playbook).status, 2);
   // The user's reply, in their own words, does.
-  assert.equal(p.bash(`node ${flow} answer suspend --quote "いいよ、止めて"`).status, 0, "recording is open to the agent");
+  assert.equal(p.bash(`node ${flow} answer suspend`).status, 0, "recording is open to the agent");
   p.hook("user-prompt", { prompt: "いいよ、止めて" });
-  assert.match(p.cli("answer", "suspend", "--quote", "いいよ、止めて").stdout, /The user suspended the rails so you can add a check to ship\. Do only that, then run `node .*flow\.mjs unsuspend`/);
+  assert.match(p.cli("answer", "suspend").stdout, /The user suspended the rails so you can add a check to ship\. Do only that, then run `node .*flow\.mjs unsuspend`/);
   assert.equal(p.write(playbook).status, 0);
-  assert.match(fs.readFileSync(path.join(p.proj, ".flow", "demo-flow", "log.jsonl"), "utf8"), /"event":"suspend","by":"the user, who said \\"いいよ、止めて\\""/);
+  assert.match(fs.readFileSync(path.join(p.proj, ".flow", "demo-flow", "log.jsonl"), "utf8"), /"event":"suspend","by":"the user",.*"heard":"いいよ、止めて"/);
   // Turning them back on only tightens them, so the agent does it itself.
   assert.equal(p.bash(`node ${flow} unsuspend`).status, 0);
   assert.equal(p.cli("unsuspend").status, 0);
@@ -1018,9 +1021,9 @@ test("the user can answer a suspend request with a tap in the agent's choice dia
   p.cli("request", "suspend", "--reason", "add a check to ship");
   const q = [{ question: "Suspend the rails so I can add a check to ship?", options: [{ label: "Suspend" }, { label: "Keep the rails on" }] }];
   assert.match(dialog(p, "s2", q, { answers: { [q[0].question]: "Suspend" } }).pre.stderr, /already carries answers/);
-  assert.equal(p.cli("answer", "suspend", "--quote", "Suspend").status, 1);
+  assert.equal(p.cli("answer", "suspend").status, 1);
   dialog(p, "s3", q, { response: { questions: q, answers: { [q[0].question]: "Suspend" } } });
-  assert.match(p.cli("answer", "suspend", "--quote", "Suspend").stdout, /The user suspended the rails so you can add a check to ship/);
+  assert.match(p.cli("answer", "suspend").stdout, /The user suspended the rails so you can add a check to ship/);
   assert.equal(p.write(playbook).status, 0);
 });
 
@@ -1043,7 +1046,7 @@ test("a suspend request is declined or withdrawn, and each question has its own 
   q.answer("approve", "yes to both");
   assert.equal(stateOf(q).suspended, false);
   assert.equal(stateOf(q).run.steps[2].status, "done");
-  assert.equal(q.cli("answer", "suspend", "--quote", "yes to both").status, 0);
+  assert.equal(q.cli("answer", "suspend").status, 0);
   assert.equal(stateOf(q).suspended, true);
 });
 
@@ -1143,9 +1146,9 @@ test("with the runtime broken, the agent can still ask and the user can still su
   }
   assert.equal(p.cli("request", "suspend", "--reason", "restore lib/shell.mjs").status, 3);
   p.hook("user-prompt", { prompt: "わかった、直していいよ" });
-  for (const c of [`node ${flow} answer suspend --quote "x"; rm -rf .flow`, `node ${flow} answer suspend --quote "$(rm -rf .flow)"`, `node ${flow} answer approve --quote "x"`]) assert.equal(p.bash(c).status, 2, c);
-  assert.equal(p.bash(`node ${flow} answer suspend --quote "直していいよ"`).status, 0);
-  assert.match(p.cli("answer", "suspend", "--quote", "直していいよ").stdout, /The user suspended the rails so you can restore lib\/shell\.mjs/);
+  for (const c of [`node ${flow} answer suspend; rm -rf .flow`, `node ${flow} answer suspend --note "$(rm -rf .flow)"`, `node ${flow} answer approve`]) assert.equal(p.bash(c).status, 2, c);
+  assert.equal(p.bash(`node ${flow} answer suspend --note "repair the runtime"`).status, 0);
+  assert.match(p.cli("answer", "suspend").stdout, /The user suspended the rails so you can restore lib\/shell\.mjs/);
   assert.equal(p.write(".claude/skills/demo-flow/scripts/lib/shell.mjs").status, 0);
   fs.renameSync(path.join(p.proj, "shell.mjs.bak"), path.join(p.skill, "scripts", "lib", "shell.mjs"));
   assert.equal(p.bash(`node ${flow} unsuspend`).status, 0);
